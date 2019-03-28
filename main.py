@@ -19,6 +19,7 @@ import utils
 import itertools
 import torch.nn.functional as functional
 import time
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 period = 30
 
@@ -28,7 +29,7 @@ parser.add_argument('--dataset', required=False, default='unet_256_kalman', help
 parser.add_argument('--train', type=bool, default=True, help='unet_affine_temp')
 parser.add_argument('--dir_logs', default='logs', help='logs for tensorboard')
 parser.add_argument('--num_layer', type=int, default=3, help='number of layers for cascading')
-parser.add_argument('--batchSize', type=int, default=8, help='training batch size')
+parser.add_argument('--batchSize', type=int, default=4, help='training batch size')
 parser.add_argument('--testBatchSize', type=int, default=2, help='testing batch size')
 parser.add_argument('--nEpochs', type=int, default=60, help='number of epochs to train for')
 parser.add_argument('--input_nc', type=int, default=period + 1, help='input image channels')
@@ -250,7 +251,7 @@ def pre_propossing(images, features):
     return images_stable, images_unstable, feature_stable, feature_unstable
 
 
-def loss_pixel(grid, affine):
+def loss_pixel(grid):
     target_height = opt.input_size
     target_width = opt.input_size
     HW = target_height * target_width
@@ -260,13 +261,23 @@ def loss_pixel(grid, affine):
     Y = Y * 2 / (target_height - 1) - 1
     X = X * 2 / (target_width - 1) - 1
     target_coordinate = torch.cat([X, Y], dim=1)  # convert from (y, x) to (x, y)
-    One = torch.ones(X.size())
-    stable = torch.cat([target_coordinate, One], dim=1)
-    stable = stable.expand(opt.batchSize, target_height * target_width, 3).permute(0, 2, 1)
+    #One = torch.ones(X.size())
+    stable = target_coordinate#torch.cat([target_coordinate, One], dim=1)
+    stable = stable.expand(opt.batchSize, target_height * target_width, 2).permute(0, 2, 1)
     stable = stable.cuda()
     grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
-    # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
 
+    # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
+    variation=torch.mean(torch.abs(grid_reshape-stable))
+
+    delta_x = torch.abs(variation[:, :, 0:-2, :] - variation[:, :, 1:-1, :])
+    delta_y = torch.abs(variation[:, 0:-2, :, :] - variation[:, 1:-1, :, :])
+
+    #delta_xx = torch.abs(delta_x[:, :, 0:-2, :] - delta_x[:, :, 1:-1, :])
+    #delta_yy = torch.abs(delta_y[:, 0:-2, :, :] - delta_y[:, 1:-1, :, :])
+
+    delta = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
+    '''
     loss = 0
     for i in range(opt.batchSize):
         pts1 = []  # XX
@@ -292,7 +303,8 @@ def loss_pixel(grid, affine):
         loss += np.linalg.norm(np.dot(np.dot(pts1, np.linalg.inv(np.dot(pts1.T, pts1))), np.dot(pts1.T, pts2)) - pts2)
 
     loss = loss / opt.batchSize / opt.number_feature
-    return loss
+    '''
+    return delta
 
 
 def loss_calulate(grid, feature_stable, feature_unstable, fake, real,batchSize):
@@ -467,6 +479,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
         loss_delta=0
         loss_vgg=0
         loss_g2=0
+        loss_affine=0
         for nl in range(opt.num_layer):
             loss_mse1, loss_delta1, loss_feature1 = loss_calulate(grid1[nl], feature_stable1, feature_unstable1, fake1[nl], image_stable1,opt.batchSize)
 
@@ -478,6 +491,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             loss_vgg += generator_criterion(fake2[nl], image_stable2)
             loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
 
+            loss_affine+loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*100
 
 
         # loss_g1 = loss_feature1 + loss_vgg1 + loss_feature2 + loss_vgg2  # +delta# loss_feature#+loss_mse#+10*loss_g_g#loss_g_g  # + loss_g_l1
@@ -498,7 +512,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             writer.add_scalar('scalar/loss_g_feature', loss_feature, i + epoch * batch_idxs)
             writer.add_scalar('scalar/loss_vgg', loss_vgg, i + epoch * batch_idxs)
             writer.add_scalar('scalar/delta', loss_delta, i + epoch * batch_idxs)
-            #writer.add_scalar('scalar/loss_affine', loss_affine, i + epoch * batch_idxs)
+            writer.add_scalar('scalar/loss_affine', loss_affine, i + epoch * batch_idxs)
             writer.add_scalar('scalar/mse', loss_mse, i + epoch * batch_idxs)
             # writer.add_scalar('scalar/loss', lossG, i + epoch * batch_idxs)
         if i%100==0:
