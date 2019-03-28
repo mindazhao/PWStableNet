@@ -268,7 +268,7 @@ def loss_pixel(grid):
     grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
 
     # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
-    variation=torch.mean(torch.abs(grid_reshape-stable))
+    variation=grid_reshape-stable
 
     delta_x = torch.abs(variation[:, :, 0:-2, :] - variation[:, :, 1:-1, :])
     delta_y = torch.abs(variation[:, 0:-2, :, :] - variation[:, 1:-1, :, :])
