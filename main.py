@@ -264,17 +264,15 @@ def loss_pixel(grid):
     #One = torch.ones(X.size())
     stable = target_coordinate#torch.cat([target_coordinate, One], dim=1)
     stable = stable.expand(opt.batchSize, target_height * target_width, 2).permute(0, 2, 1)
+    stable=stable.reshape([opt.batchSize,2, opt.input_size,opt.input_size])
     stable = stable.cuda()
-    grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
-
+    #grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
+    grid=grid.permute(0,3,1,2)
     # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
-    variation=grid_reshape-stable
+    variation=grid-stable
 
-    delta_x = torch.abs(variation[:, :, 0:-2, :] - variation[:, :, 1:-1, :])
-    delta_y = torch.abs(variation[:, 0:-2, :, :] - variation[:, 1:-1, :, :])
-
-    #delta_xx = torch.abs(delta_x[:, :, 0:-2, :] - delta_x[:, :, 1:-1, :])
-    #delta_yy = torch.abs(delta_y[:, 0:-2, :, :] - delta_y[:, 1:-1, :, :])
+    delta_x = torch.abs(variation[:, :, 0: -2, :] - variation[:, :, 1:-1,:])
+    delta_y = torch.abs(variation[:, :, :, 0: -2] - variation[:, :,:, 1: -1])
 
     delta = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
     '''
@@ -491,7 +489,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             loss_vgg += generator_criterion(fake2[nl], image_stable2)
             loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
 
-            loss_affine+loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*100
+            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*100
 
 
         # loss_g1 = loss_feature1 + loss_vgg1 + loss_feature2 + loss_vgg2  # +delta# loss_feature#+loss_mse#+10*loss_g_g#loss_g_g  # + loss_g_l1
