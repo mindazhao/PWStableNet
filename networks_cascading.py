@@ -8,6 +8,16 @@ from torch.optim import lr_scheduler
 # Helper Functions
 ###############################################################################
 
+def get_norm_layer(norm_type='instance'):
+    if norm_type == 'batch':
+        norm_layer = functools.partial(nn.BatchNorm2d, affine=True)
+    elif norm_type == 'instance':
+        norm_layer = functools.partial(nn.InstanceNorm2d, affine=False, track_running_stats=False)
+    elif norm_type == 'none':
+        norm_layer = None
+    else:
+        raise NotImplementedError('normalization layer [%s] is not found' % norm_type)
+    return norm_layer
 
 
 def init_weights(net, init_type='normal', gain=0.02):
@@ -330,7 +340,7 @@ class NLayerDiscriminator(nn.Module):
             sequence =sequence+ [
                 nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult,
                           kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                norm_layer(ndf * nf_mult),
+                #norm_layer(ndf * nf_mult),
                 nn.LeakyReLU(0.2, True)
             ]
 
@@ -339,7 +349,7 @@ class NLayerDiscriminator(nn.Module):
         sequence =sequence+ [
             nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult,
                       kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-            norm_layer(ndf * nf_mult),
+            #norm_layer(ndf * nf_mult),
             nn.LeakyReLU(0.2, True)
         ]
 
