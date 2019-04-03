@@ -46,11 +46,14 @@ parser.add_argument('--input_size',type=int,default=256,help='size of input imag
 parser.add_argument('--use_gan',type=bool,default=True,help='train with gan or not')
 parser.add_argument('--gpu_ids',type=int,default=[],help='gpu devices')
 parser.add_argument('--path_feature',default='feature512/',help='path of feature for train')
+parser.add_argument('--path_affine',default='affine512/',help='path of affine for train')
 parser.add_argument('--path_image',default='image512_whole/',help='path of image for train')
 parser.add_argument('--path_adjacent',default='feature_adjacent256/',help='path of adjacent homograpy for train')
 parser.add_argument('--number_feature',type=int,default=400,help='number of feature points for train')
 parser.add_argument('--period_D',type=int,default=3,help='period for discriminator 2*period_D+1')
 parser.add_argument('--balance_gd', type=float, default=1, help='balance of generator loss and discriminator loss')
+parser.add_argument('--start_gan', type=int, default=15, help='epoch of starting gan')
+parser.add_argument('--start_loss_affine', type=int, default=10, help='epoch of starting loss_affine')
 opt = parser.parse_args()
 print(opt)
 
@@ -77,7 +80,8 @@ cudnn.benchmark = True
 print('===> Building model')
 # netG = Net()
 netG = define_G(opt.input_nc, opt.output_nc, opt.ngf, 'normal', 0.02, opt.gpu_ids)
-netD = define_D(2*opt.period_D+1, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False)
+if opt.use_gan:
+    netD = define_D(2*opt.period_D+1, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False)
 #netD2 = define_D(3 + 3, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False, gpu_ids=[0])
 
 # setup optimizer
@@ -113,17 +117,21 @@ def image_store(files):#store all images and features in memory for accelarating
     list_stable = []
     list_feature=[]
     list_adjacent=[]
+    list_affine=[]
 
     for video_id in range(0, len(files)):
         print('image_store---' + '[' +str(video_id)+ '/'+ str(len(files))+' ]')
         feature_path = opt.path_feature + str(files[video_id]) + '.avi.txt'
         adjacent_path = opt.path_adjacent + str(files[video_id]) + '.avi.txt'
+        affine_path = opt.path_affine + str(files[video_id]) + '.avi.txt'
         f = open(feature_path, "r")
         f_adjacent = open(adjacent_path, "r")
+        f_affine = open(affine_path, "r")
         list_unstable_clip = []
         list_stable_clip = []
         feature_clip = []
         adjacent_clip = []
+        affine_clip = []
         numframe = list(map(int, f.readline().split()))[0]
         f_adjacent.readline()
         for i in range(0, numframe):
@@ -157,20 +165,25 @@ def image_store(files):#store all images and features in memory for accelarating
             line = f_adjacent.readline()
             line_re = line.split()
             adjacent_clip.append(list(map(float, line_re)))
+
+            line = f_affine.readline()
+            line_re = line.split()
+            affine_clip.append(list(map(float, line_re)))
         f.close()
         f_adjacent.close()
-
+        f_affine.close()
         list_unstable.append(list_unstable_clip)
         list_stable.append(list_stable_clip)
         list_feature.append(feature_clip)
         list_adjacent.append(adjacent_clip)
-
-    return list_stable, list_unstable,list_feature,list_adjacent
+        list_affine.append(affine_clip)
+    return list_stable, list_unstable,list_feature,list_adjacent,list_affine
 
 
 class customData(Dataset):
-    def __init__(self, files, list_random, list_stable, list_unstable,list_feature,list_adjacent,with_gan):
+    def __init__(self, files, list_random, list_stable, list_unstable,list_feature,list_adjacent,list_affine,with_gan):
         self.feature_all_all = list_feature
+        self.affine_all_all=list_affine
         self.feature_all_adjacent =list_adjacent
         self.files = files
         self.list_random = list_random
@@ -223,6 +236,7 @@ class customData(Dataset):
         arr_add = np.ones([feature_one.shape[0], 1])
         feature_data1 = np.concatenate((feature_one[:, 2:4], arr_add, feature_one[:, 0:2], arr_add),axis=1)  # stable unstable
 
+        affine_data1 = np.array(self.affine_all_all[video_id][int(numframe_id)])
 
 
         ## second_part
@@ -265,10 +279,11 @@ class customData(Dataset):
         arr_add = np.ones([feature_one.shape[0], 1])
         feature_data2 = np.concatenate((feature_one[:, 2:4], arr_add, feature_one[:, 0:2], arr_add),axis=1)  # stable unstable
 
+        affine_data2 = np.array(self.affine_all_all[video_id][int(numframe_id)])
 
         feature_one_adjacent = np.array(self.feature_all_adjacent[video_id][int(numframe_id) - 1])
 
-        return img_data1, feature_data1, img_data2, feature_data2, feature_one_adjacent  # stable->unstable
+        return img_data1, feature_data1, affine_data1, img_data2, feature_data2, affine_data2, feature_one_adjacent  # stable->unstable
 
 
 def pre_propossing(images, features):
@@ -306,6 +321,8 @@ def loss_pixel(grid):
     delta_y = torch.abs(variation[:, :, :, 0: -1] - variation[:, :,:, 1:])
 
     delta = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
+
+
     '''
     loss = 0
     for i in range(opt.batchSize):
@@ -334,7 +351,30 @@ def loss_pixel(grid):
     loss = loss / opt.batchSize / opt.number_feature
     '''
     return delta
+def frame_clip(sequence, affine):
+    sequence_tensor=torch.Tensor(sequence.size())
+    boundary = [[-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]]
+    boundary = torch.Tensor(boundary)
+    boundary = boundary.expand(opt.batchSize, 4,3).permute(0, 2, 1)
+    boundary=boundary.cuda().float()
+    affine = affine.view(-1, 2, 3)
+    bound_batch=torch.matmul(affine, boundary.float())
+    x_start=bound_batch[:,0,[0,2]].cpu().numpy()
+    x_end = bound_batch[:, 0, [1, 3]].cpu().numpy()
+    y_start = bound_batch[:, 1, [0, 1]].cpu().numpy()
+    y_end = bound_batch[:, 1, [2, 3]].cpu().numpy()
 
+
+    for i in range(opt.batchSize):
+        x_s = max(max(x_start[i]),-1)
+        x_e = min(min(x_end[i]),1)
+        y_s = max(max(y_start[i]),-1)
+        y_e = min(min(y_end[i]), 1)
+
+        m = torch.nn.Upsample(size=opt.input_size, mode='bilinear')
+        temp=torch.unsqueeze(sequence[i, :, int((x_s + 1) * opt.input_size / 2):int((x_e + 1) * opt.input_size / 2),int((y_s + 1) * opt.input_size / 2):int((y_e + 1) * opt.input_size / 2)],0)
+        sequence_tensor[i] = m(temp)
+    return sequence_tensor
 
 def loss_calulate(grid, feature_stable, feature_unstable, fake, real,batchSize):
     feature_loss = 0
@@ -383,13 +423,13 @@ def load_model(model):
     return model
 
 
-def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, list_epoch):
-    if epoch>20:
+def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, list_affine, list_epoch):
+    if epoch>opt.start_gan:
         with_gan=True
     else:
         with_gan=False
     netG.train()
-    if opt.continue_train and epoch==opt.continue_train:
+    if opt.continue_train>0 and epoch==opt.continue_train:
          net_g_model_out_path = "checkpoint/{}/netG_model_epoch_{}.pth".format(opt.dataset, opt.continue_train)
          checkpoint=torch.load(net_g_model_out_path)
          netG.load_state_dict(checkpoint['net'])
@@ -401,7 +441,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
     writer = SummaryWriter(opt.dir_logs)
 
     random.shuffle(list_epoch)
-    dataset = customData(train_files, list_epoch, list_stable, list_unstable,list_feature,list_adjacent,with_gan)
+    dataset = customData(train_files, list_epoch, list_stable, list_unstable,list_feature,list_adjacent,list_affine, with_gan)
     sample = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize, shuffle=True,num_workers=opt.threads,pin_memory=True)
     iter_sample = iter(sample)
 
@@ -409,18 +449,20 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
 
     for i in range(batch_idxs):
         time_begin = time.time()
-        images1, features1, images2, features2, feature_adjacent = next(iter_sample)
+        images1, features1, affine1, images2, features2, affine2, feature_adjacent = next(iter_sample)
 
         images1 = images1.cuda()
         images2 = images2.cuda()
         features1 = features1.cuda().float()
         features2 = features2.cuda().float()
+        affine1=affine1.cuda().float()
+        affine2=affine2.cuda().float()
 
         feature_adjacent = feature_adjacent.cuda().float()
 
-        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1,)
+        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1)
 
-        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2,)
+        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2)
 
         # real_a.data.resize_(image_unstable1.size()).copy_(image_unstable1)
         # real_b.data.resize_(image_stable1.size()).copy_(image_stable1)
@@ -455,20 +497,49 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
 
             # train with fake
             fake_ab1 = torch.cat((image_stable1[:,3:3+opt.period_D,:,:], fake1_gray, image_stable1[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
+            # #
+            # samples = fake_ab1[0, 2, :, :].data.cpu().numpy()
+            # samples = (samples + 1) * 127.5
+            # # samples = samples.transpose((1, 2, 0))
+            # # samples = samples.reshape((144, 256,-1))
+            # samples = np.array(samples.astype(np.uint8))
+            # cv2.imshow('stable_origin', samples)
+            #
+            # fake_ab1=frame_clip(fake_ab1, affine1)
+            #
+            # samples = fake_ab1[0, 2, :, :].data.cpu().numpy()
+            # samples = (samples + 1) * 127.5
+            # #samples = samples.transpose((1, 2, 0))
+            # # samples = samples.reshape((144, 256,-1))
+            # samples = np.array(samples.astype(np.uint8))
+            # cv2.imshow('stable',samples)
+            #
+            # samples = image_unstable1[0, 15, :, :].data.cpu().numpy()
+            # samples = (samples + 1) * 127.5
+            # # samples = samples.transpose((1, 2, 0))
+            # # samples = samples.reshape((144, 256,-1))
+            # samples = np.array(samples.astype(np.uint8))
+            # cv2.imshow('unstable', samples)
+            #
+            # cv2.waitKey(0)
+            fake_ab1 = frame_clip(fake_ab1, affine1)
             pred_fake1 = netD.forward(fake_ab1.detach())
             loss_d_fake1 = criterionGAN(pred_fake1, False)
 
             fake_ab2 = torch.cat((image_stable2[:,3:3+opt.period_D,:,:], fake2_gray, image_stable2[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
+            fake_ab2 = frame_clip(fake_ab2, affine2)
             pred_fake2 = netD.forward(fake_ab2.detach())
             loss_d_fake2 = criterionGAN(pred_fake2, False)
 
 
             # train with real
             real_ab1 = image_stable1[:,3:3+opt.period_D*2+1,:,:]
+            real_ab1 = frame_clip(real_ab1, affine1)
             pred_real1 = netD.forward(real_ab1)
             loss_d_real1 = criterionGAN(pred_real1, True)
 
             real_ab2 = image_stable2[:,3:3+opt.period_D*2+1,:,:]
+            real_ab2= frame_clip(real_ab2, affine2)
             pred_real2 = netD.forward(real_ab2)
             loss_d_real2 = criterionGAN(pred_real2, True)
 
@@ -486,11 +557,13 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
         optimizerG.zero_grad()
         if opt.use_gan and with_gan:
             fake_ab1 = torch.cat((image_stable1[:,3:3+opt.period_D,:,:], fake1_gray, image_stable1[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            pred_fake1 = netD.forward(fake_ab1)
+            fake_ab1 = frame_clip(fake_ab1, affine1)
+            pred_fake1 = netD(fake_ab1)
             loss_d_fake1_g = criterionGAN(pred_fake1, True)*opt.balance_gd
 
             fake_ab2 = torch.cat((image_stable2[:,3:3+opt.period_D,:,:], fake2_gray, image_stable2[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            pred_fake2 = netD.forward(fake_ab2)
+            fake_ab2 = frame_clip(fake_ab2, affine2)
+            pred_fake2 = netD(fake_ab2)
             loss_d_fake2_g = criterionGAN(pred_fake2, True)*opt.balance_gd
 
 
@@ -512,12 +585,14 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             loss_vgg += generator_criterion(fake2[nl], image_stable2[:,0:3,:,:])
             loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
 
-            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*100
+            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*20
 
 
         # loss_g1 = loss_feature1 + loss_vgg1 + loss_feature2 + loss_vgg2  # +delta# loss_feature#+loss_mse#+10*loss_g_g#loss_g_g  # + loss_g_l1
-
-        loss_g1 = loss_feature + loss_vgg + loss_mse#+ loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
+        if epoch>opt.start_loss_affine:
+            loss_g1 = loss_feature + loss_vgg + loss_mse+loss_affine#+ loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
+        else:
+            loss_g1 = loss_feature + loss_vgg + loss_mse  # + loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
         if opt.use_gan and with_gan:
 
             loss_g = loss_g1 + loss_g2 * opt.lamd +(loss_d_fake1_g+loss_d_fake2_g)/2
@@ -539,51 +614,49 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             if opt.use_gan and with_gan:
                 writer.add_scalar('scalar/loss_d_fake1_g', loss_d_fake1_g, i + epoch * batch_idxs)
         if i%100==0:
-            writer.add_image('image/unstable',
-                             vutils.make_grid(image_unstable1[0:3, period + 1:period + 1 + 3, :, :], normalize=True,
-                                              scale_each=True),
-                             i + epoch * batch_idxs)
+            writer.add_image('image/unstable',vutils.make_grid(image_unstable1[0:3, period + 1:period + 1 + 3, :, :], normalize=True,scale_each=True),i + epoch * batch_idxs)
+            if opt.use_gan and with_gan:
+                writer.add_image('image/fake1_gray',vutils.make_grid(fake1_gray[0:3,:,:,:], normalize=True,scale_each=True),i + epoch * batch_idxs)
+                writer.add_image('image/fake1_gray_crop',vutils.make_grid(fake_ab1[0:3,3,:,:], normalize=True,scale_each=True),i + epoch * batch_idxs)
+
             for nl in range(opt.num_layer):
 
-                writer.add_image('image/stable_fake'+str(nl+1),
-                                 vutils.make_grid(fake1[nl][0:3, 0:3, :, :], normalize=True, scale_each=True),
-                                 i + epoch * batch_idxs)
+                writer.add_image('image/stable_fake'+str(nl+1),vutils.make_grid(fake1[nl][0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
 
-            writer.add_image('image/stable_real',
-                             vutils.make_grid(image_stable1[0:3, 0:3, :, :], normalize=True, scale_each=True),
-                             i + epoch * batch_idxs)
+            writer.add_image('image/stable_real',vutils.make_grid(image_stable1[0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
         time_end = time.time()
         time_each=time_end-time_begin
         time_left=((opt.nEpochs-epoch)*batch_idxs+batch_idxs-i)*time_each/3600
         print("=>train--Epoch[{}]({}/{}): time(s): {:.4f} Time_left(h): {:.4f}  Learning rate: {:.6f}".format(
             epoch, i, batch_idxs, time_each, time_left, lr))
 
-def test(epoch,list_stable, list_unstable, list_feature, list_adjacent, list_epoch):
+def test(epoch,list_stable, list_unstable, list_feature, list_adjacent, list_affine, list_epoch):
     netG.eval()
-
+    with_gan = False
     writer = SummaryWriter(opt.dir_logs)
 
     random.shuffle(list_epoch)
-    dataset = customData(val_files, list_epoch, list_stable, list_unstable, list_feature, list_adjacent)
-    sample = torch.utils.data.DataLoader(dataset, batch_size=opt.testBatchSize, shuffle=False, num_workers=opt.threads,
-                                         pin_memory=True)
+    dataset = customData(val_files, list_epoch, list_stable, list_unstable, list_feature, list_affine, list_adjacent, with_gan)
+    sample = torch.utils.data.DataLoader(dataset, batch_size=opt.testBatchSize, shuffle=False, num_workers=opt.threads,pin_memory=True)
     iter_sample = iter(sample)
 
     batch_idxs = (int(dataset.__len__())) // opt.testBatchSize
 
     for i in range(batch_idxs):
-        images1, features1, images2, features2, feature_adjacent = next(iter_sample)
+        images1, features1, affine1, images2, features2, affine2, feature_adjacent = next(iter_sample)
 
         images1 = images1.cuda()
         images2 = images2.cuda()
         features1 = features1.cuda().float()
         features2 = features2.cuda().float()
+        affine1=affine1.cuda().float()
+        affine2=affine2.cuda().float()
 
         feature_adjacent = feature_adjacent.cuda().float()
 
-        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1, )
+        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1)
 
-        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2, )
+        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2)
 
         # real_a.data.resize_(image_unstable1.size()).copy_(image_unstable1)
         # real_b.data.resize_(image_stable1.size()).copy_(image_stable1)
@@ -936,8 +1009,8 @@ def process():
 
 def main():
     if opt.train:
-        list_stable,list_unstable,list_feature,list_adjacent=image_store(train_files)
-        list_stable_val,list_unstable_val,list_feature_val,list_adjacent_val=image_store(val_files)
+        list_stable,list_unstable,list_feature,list_adjacent,list_affine=image_store(train_files)
+        list_stable_val,list_unstable_val,list_feature_val,list_adjacent_val,list_affine_val=image_store(val_files)
 
         list_epoch = list_random(train_files)
         list_epoch_val = list_random(val_files)
@@ -945,11 +1018,11 @@ def main():
         for epoch in range(opt.continue_train, opt.nEpochs):
 
                 if epoch % 5 == 1:
-                    #test(epoch, list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_epoch_val)
+                    test(epoch, list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
                     checkpoint(epoch)
 
                 lr = opt.lr * 0.1 ** int(epoch / 20)
-                train(epoch, lr,list_stable,list_unstable,list_feature,list_adjacent,list_epoch)
+                train(epoch, lr,list_stable,list_unstable,list_feature,list_adjacent,list_affine,list_epoch)
     else:
         process()
 
