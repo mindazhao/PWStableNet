@@ -1,1036 +1,682 @@
+# Copyright 2016 The TensorFlow Authors. All Rights Reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+# ==============================================================================
+"""Provides an API for generating Event protocol buffers."""
+
+from __future__ import absolute_import
+from __future__ import division
 from __future__ import print_function
-import argparse
+
+import json
 import os
-import torch
-import torch.nn as nn
-import torch.optim as optim
-from torch.autograd import Variable
-# from torch.utils.data import DataLoader
-from torch.utils.data import Dataset, DataLoader
-from networks_cascading import define_G, define_D, GANLoss
-import torch.backends.cudnn as cudnn
-import random
-import cv2
-import numpy as np
-from tensorboardX import SummaryWriter
-import torchvision.utils as vutils
-from vgg import GeneratorLoss
-import utils
-import itertools
-import torch.nn.functional as functional
+import six
 import time
-#os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
-period = 30
-
-parser = argparse.ArgumentParser(description='pix2pix-warping-PyTorch-implementation')
-parser.add_argument('--continue_train',type=int,default=0,help='the number of starting train')
-parser.add_argument('--dataset', required=False, default='unet_256_kalman', help='unet_affine_temp')
-parser.add_argument('--train', type=bool, default=True, help='unet_affine_temp')
-parser.add_argument('--dir_logs', default='logs', help='logs for tensorboard')
-parser.add_argument('--num_layer', type=int, default=3, help='number of layers for cascading')
-parser.add_argument('--batchSize', type=int, default=8, help='training batch size')
-parser.add_argument('--testBatchSize', type=int, default=2, help='testing batch size')
-parser.add_argument('--nEpochs', type=int, default=60, help='number of epochs to train for')
-parser.add_argument('--input_nc', type=int, default=period + 1, help='input image channels')
-parser.add_argument('--output_nc', type=int, default=2, help='output image channels')
-parser.add_argument('--ngf', type=int, default=32, help='generator filters in first conv layer')
-parser.add_argument('--ndf', type=int, default=64, help='discriminator filters in first conv layer')
-parser.add_argument('--lr', type=float, default=0.0002, help='Learning Rate. Default=0.002')
-parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
-parser.add_argument('--cuda', default=True, action='store_true', help='use cuda?')
-parser.add_argument('--threads', type=int, default=16, help='number of threads for data loader to use')
-parser.add_argument('--seed', type=int, default=123, help='random seed to use. Default=123')
-parser.add_argument('--lamd', type=int, default=10, help='weight on L1 term in objective')
-parser.add_argument('--input_size',type=int,default=256,help='size of input images for networks')
-parser.add_argument('--use_gan',type=bool,default=True,help='train with gan or not')
-parser.add_argument('--gpu_ids',type=int,default=[],help='gpu devices')
-parser.add_argument('--path_feature',default='feature512/',help='path of feature for train')
-parser.add_argument('--path_affine',default='affine512/',help='path of affine for train')
-parser.add_argument('--path_image',default='image512_whole/',help='path of image for train')
-parser.add_argument('--path_adjacent',default='feature_adjacent256/',help='path of adjacent homograpy for train')
-parser.add_argument('--number_feature',type=int,default=400,help='number of feature points for train')
-parser.add_argument('--period_D',type=int,default=3,help='period for discriminator 2*period_D+1')
-parser.add_argument('--balance_gd', type=float, default=1, help='balance of generator loss and discriminator loss')
-parser.add_argument('--start_gan', type=int, default=15, help='epoch of starting gan')
-parser.add_argument('--start_loss_affine', type=int, default=10, help='epoch of starting loss_affine')
-opt = parser.parse_args()
-print(opt)
-
-if opt.use_gan:
-    criterionGAN = GANLoss()
+from .embedding import make_mat, make_sprite, make_tsv, append_pbtxt
+from .event_file_writer import EventFileWriter
+from .graph_onnx import gg
+from .pytorch_graph import graph
+from .src import event_pb2
+from .src import summary_pb2
+from .src import graph_pb2
+from .summary import scalar, histogram, image, audio, text, pr_curve, pr_curve_raw, video
+from .utils import figure_to_image
+from tensorboardX.src.event_pb2 import SessionLog
+from tensorboardX.src.event_pb2 import Event
+from tensorboardX.summary import image_boxes
 
 
-index_sample = np.append(np.arange(-period // 2, 0, 1), np.arange(0, period // 2 + 1, 1))
-index_sample_discriminator=np.append(np.arange(-opt.period_D, 0, 1), np.arange(0, opt.period_D+1, 1))
+class SummaryToEventTransformer(object):
+    """Abstractly implements the SummaryWriter API.
+    This API basically implements a number of endpoints (add_summary,
+    add_session_log, etc). The endpoints all generate an event protobuf, which is
+    passed to the contained event_writer.
+    @@__init__
+    @@add_summary
+    @@add_session_log
+    @@add_graph
+    @@add_meta_graph
+    @@add_run_metadata
+    """
 
-feature_all_all = []
-train_files = [1]#, 2, 3, 5, 7, 9, 10, 11, 13, 14, 15, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 30, 33, 35, 37, 38, 41,
-               #42, 43, 44, 45, 46, 47, 48, 50, 51, 54, 55, 58, 59, 60, 53]
-val_files = [6]#, 12]#, 16, 23, 32, 40, 49, 61]
-test_files = [4, 8, 34, 39, 52, 27, 29, 57]
+    def __init__(self, event_writer, graph=None, graph_def=None):
+        """Creates a `SummaryWriter` and an event file.
+        On construction the summary writer creates a new event file in `logdir`.
+        This event file will contain `Event` protocol buffers constructed when you
+        call one of the following functions: `add_summary()`, `add_session_log()`,
+        `add_event()`, or `add_graph()`.
+        If you pass a `Graph` to the constructor it is added to
+        the event file. (This is equivalent to calling `add_graph()` later).
+        TensorBoard will pick the graph from the file and display it graphically so
+        you can interactively explore the graph you built. You will usually pass
+        the graph from the session in which you launched it:
+        ```python
+        ...create a graph...
+        # Launch the graph in a session.
+        sess = tf.Session()
+        # Create a summary writer, add the 'graph' to the event file.
+        writer = tf.summary.FileWriter(<some-directory>, sess.graph)
+        ```
+        Args:
+          event_writer: An EventWriter. Implements add_event method.
+          graph: A `Graph` object, such as `sess.graph`.
+          graph_def: DEPRECATED: Use the `graph` argument instead.
+        """
+        self.event_writer = event_writer
+        # For storing used tags for session.run() outputs.
+        self._session_run_tags = {}
+        # TODO(zihaolucky). pass this an empty graph to check whether it's necessary.
+        # currently we don't support graph in MXNet using tensorboard.
 
+    def add_summary(self, summary, global_step=None, walltime=None):
+        """Adds a `Summary` protocol buffer to the event file.
+        This method wraps the provided summary in an `Event` protocol buffer
+        and adds it to the event file.
+        You can pass the result of evaluating any summary op, using
+        [`Session.run()`](client.md#Session.run) or
+        [`Tensor.eval()`](framework.md#Tensor.eval), to this
+        function. Alternatively, you can pass a `tf.Summary` protocol
+        buffer that you populate with your own data. The latter is
+        commonly done to report evaluation results in event files.
+        Args:
+          summary: A `Summary` protocol buffer, optionally serialized as a string.
+          global_step: Number. Optional global step value to record with the
+            summary.
+          walltime: float. Optional walltime to override the default (current)
+            walltime (from time.time())
+        """
+        if isinstance(summary, bytes):
+            summ = summary_pb2.Summary()
+            summ.ParseFromString(summary)
+            summary = summ
+        event = event_pb2.Event(summary=summary)
+        self._add_event(event, global_step, walltime)
 
-if opt.cuda and not torch.cuda.is_available():
-    raise Exception("No GPU found, please run without --cuda")
+    def add_graph(self, graph_profile, walltime=None):
+        graph = graph_profile[0]
+        stepstats = graph_profile[1]
+        """Adds a `Graph` protocol buffer to the event file.
+        """
+        event = event_pb2.Event(graph_def=graph.SerializeToString())
+        self._add_event(event, None, walltime)
 
-cudnn.benchmark = True
+        trm = event_pb2.TaggedRunMetadata(tag='step1', run_metadata=stepstats.SerializeToString())
+        event = event_pb2.Event(tagged_run_metadata=trm)
+        self._add_event(event, None, walltime)
 
+    def add_graph_onnx(self, graph, walltime=None):
+        """Adds a `Graph` protocol buffer to the event file.
+        """
+        event = event_pb2.Event(graph_def=graph.SerializeToString())
+        self._add_event(event, None, walltime)
 
-print('===> Building model')
-# netG = Net()
-netG = define_G(opt.input_nc, opt.output_nc, opt.ngf, 'normal', 0.02, opt.gpu_ids)
-if opt.use_gan:
-    netD = define_D(2*opt.period_D+1, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False)
-#netD2 = define_D(3 + 3, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False, gpu_ids=[0])
+    def add_session_log(self, session_log, global_step=None, walltime=None):
+        """Adds a `SessionLog` protocol buffer to the event file.
+        This method wraps the provided session in an `Event` protocol buffer
+        and adds it to the event file.
+        Args:
+          session_log: A `SessionLog` protocol buffer.
+          global_step: Number. Optional global step value to record with the
+            summary.
+        """
+        event = event_pb2.Event(session_log=session_log)
+        self._add_event(event, global_step, walltime)
 
-# setup optimizer
-generator_criterion=GeneratorLoss()
-torch.manual_seed(opt.seed)
-if opt.cuda:
-    netG = netG.cuda()
-    netD = netD.cuda()
-    #netD2 = netD2.cuda()
-    generator_criterion = generator_criterion.cuda()
-    torch.cuda.manual_seed_all(opt.seed)
-    if opt.use_gan:
-        criterionGAN.cuda()
-
-
-def list_random(files):
-    list_random = []
-
-    for video_id in range(0, len(files)):
-        feature_path = opt.path_feature + str(files[video_id]) + '.avi.txt'
-        f = open(feature_path, "r")
-
-        numframe = list(map(int, f.readline().split()))[0]
-        for i in range(0 + period // 2, numframe - period // 2 - 1, 1):
-            video_frame = [video_id, i]
-            list_random.append(video_frame)
-        f.close()
-    return list_random
-
-
-def image_store(files):#store all images and features in memory for accelarating loading speed.
-    list_unstable = []
-    list_stable = []
-    list_feature=[]
-    list_adjacent=[]
-    list_affine=[]
-
-    for video_id in range(0, len(files)):
-        print('image_store---' + '[' +str(video_id)+ '/'+ str(len(files))+' ]')
-        feature_path = opt.path_feature + str(files[video_id]) + '.avi.txt'
-        adjacent_path = opt.path_adjacent + str(files[video_id]) + '.avi.txt'
-        affine_path = opt.path_affine + str(files[video_id]) + '.avi.txt'
-        f = open(feature_path, "r")
-        f_adjacent = open(adjacent_path, "r")
-        f_affine = open(affine_path, "r")
-        list_unstable_clip = []
-        list_stable_clip = []
-        feature_clip = []
-        adjacent_clip = []
-        affine_clip = []
-        numframe = list(map(int, f.readline().split()))[0]
-        f_adjacent.readline()
-        for i in range(0, numframe):
-
-            image_path_unstable = opt.path_image+'unstable/' + str(files[video_id]) + '.avi/'
-            image_path_stable = opt.path_image+'stable/' + str(files[video_id]) + '.avi/'
-            image_path_unstable_one = image_path_unstable + str(i) + '.png'
-            image_path_stable_one = image_path_stable + str(i) + '.png'
-
-            image_unstable = cv2.imread(image_path_unstable_one)
-            size = (opt.input_size, opt.input_size)
-            shrink = cv2.resize(image_unstable, size, interpolation=cv2.INTER_AREA)
-            shrink = cv2.cvtColor(shrink, cv2.COLOR_BGR2RGB)
-            list_unstable_clip.append(shrink)
-
-            image_stable = cv2.imread(image_path_stable_one)
-            size = (opt.input_size, opt.input_size)
-            shrink = cv2.resize(image_stable, size, interpolation=cv2.INTER_AREA)
-            shrink = cv2.cvtColor(shrink, cv2.COLOR_BGR2RGB)
-            list_stable_clip.append(shrink)
-
-            feature = []
-            f.readline()#400
-            for j in range(0, opt.number_feature):
-                line = f.readline()
-                line_re = line.split()
-                feature.append(list(map(float, line_re)))
-
-            feature_clip.append(feature)
-
-            line = f_adjacent.readline()
-            line_re = line.split()
-            adjacent_clip.append(list(map(float, line_re)))
-
-            line = f_affine.readline()
-            line_re = line.split()
-            affine_clip.append(list(map(float, line_re)))
-        f.close()
-        f_adjacent.close()
-        f_affine.close()
-        list_unstable.append(list_unstable_clip)
-        list_stable.append(list_stable_clip)
-        list_feature.append(feature_clip)
-        list_adjacent.append(adjacent_clip)
-        list_affine.append(affine_clip)
-    return list_stable, list_unstable,list_feature,list_adjacent,list_affine
+    def _add_event(self, event, step, walltime):
+        event.wall_time = time.time() if walltime is None else walltime
+        if step is not None:
+            event.step = int(step)
+        self.event_writer.add_event(event)
 
 
-class customData(Dataset):
-    def __init__(self, files, list_random, list_stable, list_unstable,list_feature,list_adjacent,list_affine,with_gan):
-        self.feature_all_all = list_feature
-        self.affine_all_all=list_affine
-        self.feature_all_adjacent =list_adjacent
-        self.files = files
-        self.list_random = list_random
-        self.list_stable = list_stable
-        self.list_unstable = list_unstable
-        self.with_gan=with_gan
+class FileWriter(SummaryToEventTransformer):
+    """Writes `Summary` protocol buffers to event files.
+    The `FileWriter` class provides a mechanism to create an event file in a
+    given directory and add summaries and events to it. The class updates the
+    file contents asynchronously. This allows a training program to call methods
+    to add data to the file directly from the training loop, without slowing down
+    training.
+    @@__init__
+    @@add_summary
+    @@add_session_log
+    @@add_event
+    @@add_graph
+    @@add_run_metadata
+    @@get_logdir
+    @@flush
+    @@close
+    """
 
-    def __len__(self):
-        return len(self.list_random)
+    def __init__(self,
+                 logdir,
+                 graph=None,
+                 max_queue=10,
+                 flush_secs=120,
+                 filename_suffix='',
+                 graph_def=None):
+        """Creates a `FileWriter` and an event file.
+        On construction the summary writer creates a new event file in `logdir`.
+        This event file will contain `Event` protocol buffers constructed when you
+        call one of the following functions: `add_summary()`, `add_session_log()`,
+        `add_event()`, or `add_graph()`.
+        If you pass a `Graph` to the constructor it is added to
+        the event file. (This is equivalent to calling `add_graph()` later).
+        TensorBoard will pick the graph from the file and display it graphically so
+        you can interactively explore the graph you built. You will usually pass
+        the graph from the session in which you launched it:
+        ```python
+        ...create a graph...
+        # Launch the graph in a session.
+        sess = tf.Session()
+        # Create a summary writer, add the 'graph' to the event file.
+        writer = tf.summary.FileWriter(<some-directory>, sess.graph)
+        ```
+        The other arguments to the constructor control the asynchronous writes to
+        the event file:
+        *  `flush_secs`: How often, in seconds, to flush the added summaries
+           and events to disk.
+        *  `max_queue`: Maximum number of summaries or events pending to be
+           written to disk before one of the 'add' calls block.
+        Args:
+          logdir: A string. Directory where event file will be written.
+          graph: A `Graph` object, such as `sess.graph`.
+          max_queue: Integer. Size of the queue for pending events and summaries.
+          flush_secs: Number. How often, in seconds, to flush the
+            pending events and summaries to disk.
+          graph_def: DEPRECATED: Use the `graph` argument instead.
+        """
+        event_writer = EventFileWriter(logdir, max_queue, flush_secs, filename_suffix)
+        super(FileWriter, self).__init__(event_writer, graph, graph_def)
 
-    def __getitem__(self, index):
-        item = self.list_random[index]
-        video_id = item[0]
-        numframe_id = item[1]
-        ##First part
+    def get_logdir(self):
+        """Returns the directory where event file will be written."""
+        return self.event_writer.get_logdir()
 
-        list_unstable = []
-        list_stable = []
-        list_stable_unstable = []
-        list_stable_D=[]
-        for j in range(0, len(index_sample)):
-            image_stable = self.list_unstable[video_id][numframe_id - index_sample[len(index_sample) - 1 - j]]
-            image_stable = cv2.cvtColor(image_stable, cv2.COLOR_RGB2GRAY)
-            list_stable.append(image_stable)
+    def add_event(self, event):
+        """Adds an event to the event file.
+        Args:
+          event: An `Event` protocol buffer.
+        """
+        self.event_writer.add_event(event)
 
-        image_unstable = self.list_unstable[video_id][numframe_id]  # cv2.imread(image_path_unstable + str(int(numframe_id)) + '.png')
-        list_unstable.append(image_unstable)
+    def flush(self):
+        """Flushes the event file to disk.
+        Call this method to make sure that all pending events have been written to
+        disk.
+        """
+        self.event_writer.flush()
 
-        image_stable = self.list_stable[video_id][numframe_id]  # cv2.imread(image_path_stable + str(int(numframe_id)) + '.png')
-        list_stable_unstable.append(image_stable)
+    def close(self):
+        """Flushes the event file to disk and close the file.
+        Call this method when you do not need the summary writer anymore.
+        """
+        self.event_writer.close()
+
+    def reopen(self):
+        """Reopens the EventFileWriter.
+        Can be called after `close()` to add more events in the same directory.
+        The events will go into a new events file.
+        Does nothing if the EventFileWriter was not closed.
+        """
+        self.event_writer.reopen()
 
 
+class SummaryWriter(object):
+    """Writes `Summary` directly to event files.
+    The `SummaryWriter` class provides a high-level api to create an event file in a
+    given directory and add summaries and events to it. The class updates the
+    file contents asynchronously. This allows a training program to call methods
+    to add data to the file directly from the training loop, without slowing down
+    training.
+    """
+    def __init__(self, log_dir=None, comment='', **kwargs):
+        """
+        Args:
+            log_dir (string): save location, default is: runs/**CURRENT_DATETIME_HOSTNAME**, which changes after each
+              run. Use hierarchical folder structure to compare between runs easily. e.g. 'runs/exp1', 'runs/exp2'
+            comment (string): comment that appends to the default ``log_dir``. If ``log_dir`` is assigned,
+              this argument will no effect.
+            purge_step (int):
+              When logging crashes at step :math:`T+X` and restarts at step :math:`T`, any events
+              whose global_step larger or euqal to :math:`T` will be purged and hiding from TensorBoard.
+              Note that the resumed experiment and the crashed experiment should have the same ``log_dir``.
+            filename_suffix (string):
+              Every event file's name is suffixed with suffix. example: ``SummaryWriter(filename_suffix='.123')``
+            kwargs: extra keyword arguments for FileWriter (e.g. 'flush_secs'
+              controls how often to flush pending events). For more arguments
+              please refer to docs for 'tf.summary.FileWriter'.
+        """
+        if not log_dir:
+            import socket
+            from datetime import datetime
+            current_time = datetime.now().strftime('%b%d_%H-%M-%S')
+            log_dir = os.path.join('runs', current_time + '_' + socket.gethostname() + comment)
 
-        if opt.use_gan and self.with_gan:
-            for j in range(0, len(index_sample_discriminator)):
-                image_stable = self.list_unstable[video_id][numframe_id - index_sample_discriminator[len(index_sample_discriminator) - 1 - j]]
-                image_stable = cv2.cvtColor(image_stable, cv2.COLOR_RGB2GRAY)
-                list_stable_D.append(image_stable)
-                np_D = np.array(list_stable_D)
-
-        np_A = np.array(list_stable)
-        np_B = np.array(list_unstable).transpose(0, 3, 1, 2).squeeze()
-        np_C = np.array(list_stable_unstable).transpose(0, 3, 1, 2).squeeze()
-        if opt.use_gan and self.with_gan:
-            img_data1 = np.concatenate((np_A, np_B, np_C,np_D), axis=0)
+        if 'purge_step' in kwargs.keys():
+            most_recent_step = kwargs.pop('purge_step')
+            if not os.path.exists(log_dir):
+                print('warning: you are purging unexisting data.')
+            self.file_writer = FileWriter(logdir=log_dir, **kwargs)
+            self.file_writer.add_event(Event(step=most_recent_step, file_version='brain.Event:2'))
+            self.file_writer.add_event(Event(step=most_recent_step, session_log=SessionLog(status=SessionLog.START)))
         else:
-            img_data1 = np.concatenate((np_A, np_B, np_C), axis=0)
-
-        feature_one = np.array(self.feature_all_all[video_id][int(numframe_id)])
-        arr_add = np.ones([feature_one.shape[0], 1])
-        feature_data1 = np.concatenate((feature_one[:, 2:4], arr_add, feature_one[:, 0:2], arr_add),axis=1)  # stable unstable
-
-        affine_data1 = np.array(self.affine_all_all[video_id][int(numframe_id)])
-
-
-        ## second_part
-
-        numframe_id = item[1] + 1
-        list_unstable = []
-        list_stable = []
-        list_stable_unstable = []
-        list_stable_D = []
-        for j in range(0, len(index_sample)):
-            image_stable = self.list_unstable[video_id][numframe_id - index_sample[len(index_sample) - 1 - j]]
-            image_stable = cv2.cvtColor(image_stable, cv2.COLOR_RGB2GRAY)
-
-            list_stable.append(image_stable)
-
-        image_unstable = self.list_unstable[video_id][numframe_id]  # cv2.imread(image_path_unstable + str(int(numframe_id)) + '.png')
-        list_unstable.append(image_unstable)
-
-        image_stable = self.list_stable[video_id][numframe_id]  # cv2.imread(image_path_stable + str(int(numframe_id)) + '.png')
-
-        list_stable_unstable.append(image_stable)
-        if opt.use_gan and self.with_gan:
-            for j in range(0, len(index_sample_discriminator)):
-                image_stable = self.list_unstable[video_id][numframe_id - index_sample_discriminator[len(index_sample_discriminator) - 1 - j]]
-                image_stable = cv2.cvtColor(image_stable, cv2.COLOR_RGB2GRAY)
-                list_stable_D.append(image_stable)
-                np_D = np.array(list_stable_D)
-
-
-        np_A = np.array(list_stable)
-        np_B = np.array(list_unstable).transpose(0, 3, 1, 2).squeeze()
-        np_C = np.array(list_stable_unstable).transpose(0, 3, 1, 2).squeeze()
-        if opt.use_gan and self.with_gan:
-            img_data2 = np.concatenate((np_A, np_B, np_C,np_D), axis=0)
-        else:
-            img_data2 = np.concatenate((np_A, np_B, np_C), axis=0)
-
-
-        feature_one = np.array(self.feature_all_all[video_id][int(numframe_id)])
-        arr_add = np.ones([feature_one.shape[0], 1])
-        feature_data2 = np.concatenate((feature_one[:, 2:4], arr_add, feature_one[:, 0:2], arr_add),axis=1)  # stable unstable
-
-        affine_data2 = np.array(self.affine_all_all[video_id][int(numframe_id)])
-
-        feature_one_adjacent = np.array(self.feature_all_adjacent[video_id][int(numframe_id) - 1])
-
-        return img_data1, feature_data1, affine_data1, img_data2, feature_data2, affine_data2, feature_one_adjacent  # stable->unstable
-
-
-def pre_propossing(images, features):
-    images = images.float() * (1. / 255) * 2 - 1
-    images_unstable = images[:, 0:period + 1 + 3, :, :]
-    images_stable = images[:, period + 1 + 3:, :, :]
-    feature_stable = features[:, :, 0:3]
-    feature_unstable = features[:, :, 3:6]
-    feature_stable = feature_stable.permute(0, 2, 1)
-    feature_unstable = feature_unstable.permute(0, 2, 1)
-    return images_stable, images_unstable, feature_stable, feature_unstable
-
-
-def loss_pixel(grid):
-    target_height = opt.input_size
-    target_width = opt.input_size
-    HW = target_height * target_width
-    target_coordinate = list(itertools.product(range(target_height), range(target_width)))
-    target_coordinate = torch.Tensor(target_coordinate)  # HW x 2
-    Y, X = target_coordinate.split(1, dim=1)
-    Y = Y * 2 / (target_height - 1) - 1
-    X = X * 2 / (target_width - 1) - 1
-    target_coordinate = torch.cat([X, Y], dim=1)  # convert from (y, x) to (x, y)
-    #One = torch.ones(X.size())
-    stable = target_coordinate#torch.cat([target_coordinate, One], dim=1)
-    stable = stable.expand(opt.batchSize, target_height * target_width, 2).permute(0, 2, 1)
-    stable=stable.reshape([opt.batchSize,2, opt.input_size,opt.input_size])
-    stable = stable.cuda()
-    #grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
-    grid=grid.permute(0,3,1,2)
-    # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
-    variation=grid-stable
-
-    delta_x = torch.abs(variation[:, :, 0: -1, :] - variation[:, :, 1:,:])
-    delta_y = torch.abs(variation[:, :, :, 0: -1] - variation[:, :,:, 1:])
-
-    delta = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
-
-
-    '''
-    loss = 0
-    for i in range(opt.batchSize):
-        pts1 = []  # XX
-        pts2 = []  # YY
-
-        for sample_height in range(200):
-            x = random.randint(0, 255)
-            y = random.randint(0, 255)
-            X = grid[i, x, y, 0].cpu().detach().numpy()
-            Y = grid[i, x, y, 1].cpu().detach().numpy()
-            Xp = float(x) / 128 - 1
-            Yp = float(y) / 128 - 1
-
-            pts1.append([X, Y, 1, 0, 0, 0, -Xp * X, -Xp * Y])
-            pts1.append([0, 0, 0, X, Y, 1, -Yp * X, -Yp * Y])
-
-            pts2.append(Xp)
-            pts2.append(Yp)
-
-        pts1 = np.array(pts1, dtype=np.float32)
-        pts2 = np.array(pts2, dtype=np.float32)
-
-        loss += np.linalg.norm(np.dot(np.dot(pts1, np.linalg.inv(np.dot(pts1.T, pts1))), np.dot(pts1.T, pts2)) - pts2)
-
-    loss = loss / opt.batchSize / opt.number_feature
-    '''
-    return delta
-def frame_clip(sequence, affine):
-    sequence_tensor=torch.Tensor(sequence.size())
-    boundary = [[-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]]
-    boundary = torch.Tensor(boundary)
-    boundary = boundary.expand(opt.batchSize, 4,3).permute(0, 2, 1)
-    boundary=boundary.cuda().float()
-    affine = affine.view(-1, 2, 3)
-    bound_batch=torch.matmul(affine, boundary.float())
-    x_start=bound_batch[:,0,[0,2]].cpu().numpy()
-    x_end = bound_batch[:, 0, [1, 3]].cpu().numpy()
-    y_start = bound_batch[:, 1, [0, 1]].cpu().numpy()
-    y_end = bound_batch[:, 1, [2, 3]].cpu().numpy()
-
-
-    for i in range(opt.batchSize):
-        x_s = max(max(x_start[i]),-1)
-        x_e = min(min(x_end[i]),1)
-        y_s = max(max(y_start[i]),-1)
-        y_e = min(min(y_end[i]), 1)
-
-        m = torch.nn.Upsample(size=opt.input_size, mode='bilinear')
-        temp=torch.unsqueeze(sequence[i, :, int((x_s + 1) * opt.input_size / 2):int((x_e + 1) * opt.input_size / 2),int((y_s + 1) * opt.input_size / 2):int((y_e + 1) * opt.input_size / 2)],0)
-        sequence_tensor[i] = m(temp)
-    return sequence_tensor
-
-def loss_calulate(grid, feature_stable, feature_unstable, fake, real,batchSize):
-    feature_loss = 0
-    for i in range(batchSize):
-        grid_pos = grid[i, ((feature_stable[i, 1, :] + 1) * opt.input_size / 2).int().cpu().numpy(),
-                   ((feature_stable[i, 0, :] + 1) * opt.input_size / 2).int().cpu().numpy(), :]
-        feature_loss = feature_loss + torch.mean(torch.abs(feature_unstable[i, 0:2, :] - torch.t(grid_pos)))
-
-    feature_loss = feature_loss / opt.batchSize
-    # loss = mse_loss + args.balance_para * feature_loss
-    # loss_f = torch.nn.MSELoss()
-    mse_loss = torch.mean(torch.abs(real[:,0:3,:,:] - fake))
-
-    delta_x = torch.abs(grid[:, :, 0:opt.input_size - 1, :] - grid[:, :, 1:opt.input_size, :])
-    delta_y = torch.abs(grid[:, 0:opt.input_size - 1, :, :] - grid[:, 1:opt.input_size, :, :])
-
-    delta_xx = torch.abs(delta_x[:, :, 0:-1, :] - delta_x[:, :, 1:, :])
-    delta_yy = torch.abs(delta_y[:, 0:-1, :, :] - delta_y[:, 1:, :, :])
-
-    delta = (torch.mean(delta_xx) + torch.mean(delta_yy)) / 2
-
-    # delta_x=torch.abs(grid[])
-
-    return mse_loss, delta, feature_loss  # ,loss_sim
-
-
-def load_model(model):
-    # pretrained_dict = torchvision.models.resnet50(pretrained=False).state_dict()
-    pretrained_dict = torch.load('./checkpoint/day2night.pth')
-    model_dict = model.state_dict()
-
-    unnecessary_list = ['model.model.0.weight', 'model.model.3.weight', 'model.model.3.bias']
-    # 1. filter out unnecessary keys
-    pretrained_dict = {k: v for k, v in pretrained_dict.items() if k not in unnecessary_list}
-
-    pretrained_dict = {'module.' + k: v for k, v in pretrained_dict.items()}
-
-    pretrained_dict_new = {k: v for k, v in pretrained_dict.items() if k in model_dict}
-
-    # 2. overwrite entries in the existing state dict
-    model_dict.update(pretrained_dict_new)
-    # 3. load the new state dict
-    model.load_state_dict(model_dict)
-    start_epoch = 0
-
-    return model
-
-
-def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, list_affine, list_epoch):
-    if epoch>opt.start_gan:
-        with_gan=True
-    else:
-        with_gan=False
-    netG.train()
-    if opt.continue_train>0 and epoch==opt.continue_train:
-         net_g_model_out_path = "checkpoint/{}/netG_model_epoch_{}.pth".format(opt.dataset, opt.continue_train)
-         checkpoint=torch.load(net_g_model_out_path)
-         netG.load_state_dict(checkpoint['net'])
-
-    # netG=load_model(netG)
-    optimizerG = optim.Adam(netG.parameters(), lr=lr, betas=(opt.beta1, 0.999))
-    #optimizerD = optim.Adam([{'params': netD1.parameters()}, {'params': netD2.parameters()}], lr=0.0002,betas=(opt.beta1, 0.999))
-    optimizerD = optim.Adam(netD.parameters(), lr=lr, betas=(opt.beta1, 0.999))
-    writer = SummaryWriter(opt.dir_logs)
-
-    random.shuffle(list_epoch)
-    dataset = customData(train_files, list_epoch, list_stable, list_unstable,list_feature,list_adjacent,list_affine, with_gan)
-    sample = torch.utils.data.DataLoader(dataset, batch_size=opt.batchSize, shuffle=True,num_workers=opt.threads,pin_memory=True)
-    iter_sample = iter(sample)
-
-    batch_idxs = (int(dataset.__len__())) // opt.batchSize
-
-    for i in range(batch_idxs):
-        time_begin = time.time()
-        images1, features1, affine1, images2, features2, affine2, feature_adjacent = next(iter_sample)
-
-        images1 = images1.cuda()
-        images2 = images2.cuda()
-        features1 = features1.cuda().float()
-        features2 = features2.cuda().float()
-        affine1=affine1.cuda().float()
-        affine2=affine2.cuda().float()
-
-        feature_adjacent = feature_adjacent.cuda().float()
-
-        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1)
-
-        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2)
-
-        # real_a.data.resize_(image_unstable1.size()).copy_(image_unstable1)
-        # real_b.data.resize_(image_stable1.size()).copy_(image_stable1)
-
-        # fake_b, grid = netG(real_a)
-
-
-        fake1=[]
-        fake2=[]
-
-        grid1= netG(image_unstable1[:, 0:period + 1, :, :])
-
-        for nl in range(opt.num_layer):
-            grid1[nl]=grid1[nl].permute(0,2,3,1)
-            fake1.append(functional.grid_sample(image_unstable1[:, period + 1:period + 1 + 3, :, :], grid1[nl]))
-        fake1_gray = functional.grid_sample(image_unstable1[:, period//2 : period//2 + 1 :, :], grid1[2])
-
-        grid2 = netG(image_unstable2[:, 0:period + 1, :, :])
-
-        for nl in range(opt.num_layer):
-            grid2[nl] = grid2[nl].permute(0, 2, 3, 1)
-            fake2.append(functional.grid_sample(image_unstable2[:, period + 1:period + 1 + 3, :, :], grid2[nl]))
-        fake2_gray = functional.grid_sample(image_unstable2[:, period // 2: period // 2 + 1:, :], grid2[2])
-
-
-        ############################
-        # (1) Update D network: maximize log(D(x,y)) + log(1 - D(x,G(x)))
-        ###########################
-        if opt.use_gan and with_gan:
-
-            optimizerD.zero_grad()
-
-            # train with fake
-            fake_ab1 = torch.cat((image_stable1[:,3:3+opt.period_D,:,:], fake1_gray, image_stable1[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            # #
-            # samples = fake_ab1[0, 2, :, :].data.cpu().numpy()
-            # samples = (samples + 1) * 127.5
-            # # samples = samples.transpose((1, 2, 0))
-            # # samples = samples.reshape((144, 256,-1))
-            # samples = np.array(samples.astype(np.uint8))
-            # cv2.imshow('stable_origin', samples)
-            #
-            # fake_ab1=frame_clip(fake_ab1, affine1)
-            #
-            # samples = fake_ab1[0, 2, :, :].data.cpu().numpy()
-            # samples = (samples + 1) * 127.5
-            # #samples = samples.transpose((1, 2, 0))
-            # # samples = samples.reshape((144, 256,-1))
-            # samples = np.array(samples.astype(np.uint8))
-            # cv2.imshow('stable',samples)
-            #
-            # samples = image_unstable1[0, 15, :, :].data.cpu().numpy()
-            # samples = (samples + 1) * 127.5
-            # # samples = samples.transpose((1, 2, 0))
-            # # samples = samples.reshape((144, 256,-1))
-            # samples = np.array(samples.astype(np.uint8))
-            # cv2.imshow('unstable', samples)
-            #
-            # cv2.waitKey(0)
-            fake_ab1 = frame_clip(fake_ab1, affine1)
-            pred_fake1 = netD.forward(fake_ab1.detach())
-            loss_d_fake1 = criterionGAN(pred_fake1, False)
-
-            fake_ab2 = torch.cat((image_stable2[:,3:3+opt.period_D,:,:], fake2_gray, image_stable2[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            fake_ab2 = frame_clip(fake_ab2, affine2)
-            pred_fake2 = netD.forward(fake_ab2.detach())
-            loss_d_fake2 = criterionGAN(pred_fake2, False)
-
-
-            # train with real
-            real_ab1 = image_stable1[:,3:3+opt.period_D*2+1,:,:]
-            real_ab1 = frame_clip(real_ab1, affine1)
-            pred_real1 = netD.forward(real_ab1)
-            loss_d_real1 = criterionGAN(pred_real1, True)
-
-            real_ab2 = image_stable2[:,3:3+opt.period_D*2+1,:,:]
-            real_ab2= frame_clip(real_ab2, affine2)
-            pred_real2 = netD.forward(real_ab2)
-            loss_d_real2 = criterionGAN(pred_real2, True)
-
-            # Combined loss
-            loss_d = (loss_d_fake1 + loss_d_fake2 + loss_d_real1 + loss_d_real2) * 0.5
-
-            loss_d.backward()
-
-            optimizerD.step()
-
-
-        ############################
-        # (2) Update G network: maximize log(D(x,G(x))) + L1(y,G(x))
-        ##########################
-        optimizerG.zero_grad()
-        if opt.use_gan and with_gan:
-            fake_ab1 = torch.cat((image_stable1[:,3:3+opt.period_D,:,:], fake1_gray, image_stable1[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            fake_ab1 = frame_clip(fake_ab1, affine1)
-            pred_fake1 = netD(fake_ab1)
-            loss_d_fake1_g = criterionGAN(pred_fake1, True)*opt.balance_gd
-
-            fake_ab2 = torch.cat((image_stable2[:,3:3+opt.period_D,:,:], fake2_gray, image_stable2[:,3+opt.period_D+1:3+opt.period_D+1+opt.period_D,:,:]), 1)
-            fake_ab2 = frame_clip(fake_ab2, affine2)
-            pred_fake2 = netD(fake_ab2)
-            loss_d_fake2_g = criterionGAN(pred_fake2, True)*opt.balance_gd
-
-
-
-        loss_mse=0
-        loss_feature=0
-        loss_delta=0
-        loss_vgg=0
-        loss_g2=0
-        loss_affine=0
-        for nl in range(opt.num_layer):
-            loss_mse1, loss_delta1, loss_feature1 = loss_calulate(grid1[nl], feature_stable1, feature_unstable1, fake1[nl], image_stable1,opt.batchSize)
-
-            loss_mse2, loss_delta2, loss_feature2 = loss_calulate(grid2[nl], feature_stable2, feature_unstable2, fake2[nl], image_stable2,opt.batchSize)
-            loss_mse += loss_mse1 + loss_mse2
-            loss_feature += loss_feature1 + loss_feature2
-            loss_delta += loss_delta1 + loss_delta2
-            loss_vgg += generator_criterion(fake1[nl], image_stable1[:,0:3,:,:])
-            loss_vgg += generator_criterion(fake2[nl], image_stable2[:,0:3,:,:])
-            loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
-
-            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*20
-
-
-        # loss_g1 = loss_feature1 + loss_vgg1 + loss_feature2 + loss_vgg2  # +delta# loss_feature#+loss_mse#+10*loss_g_g#loss_g_g  # + loss_g_l1
-        if epoch>opt.start_loss_affine:
-            loss_g1 = loss_feature + loss_vgg + loss_mse+loss_affine#+ loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
-        else:
-            loss_g1 = loss_feature + loss_vgg + loss_mse  # + loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
-        if opt.use_gan and with_gan:
-
-            loss_g = loss_g1 + loss_g2 * opt.lamd +(loss_d_fake1_g+loss_d_fake2_g)/2
-        else:
-            loss_g = loss_g1 + loss_g2 * opt.lamd
-        loss_g.backward()
-
-        optimizerG.step()
-
-
-        if i % 10 == 0:
-
-            writer.add_scalar('scalar/loss_g_adjacent', loss_g2, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/loss_g_feature', loss_feature, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/loss_vgg', loss_vgg, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/delta', loss_delta, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/loss_affine', loss_affine, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/mse', loss_mse, i + epoch * batch_idxs)
-            if opt.use_gan and with_gan:
-                writer.add_scalar('scalar/loss_d_fake1_g', loss_d_fake1_g, i + epoch * batch_idxs)
-        if i%100==0:
-            writer.add_image('image/unstable',vutils.make_grid(image_unstable1[0:3, period + 1:period + 1 + 3, :, :], normalize=True,scale_each=True),i + epoch * batch_idxs)
-            if opt.use_gan and with_gan:
-                writer.add_image('image/fake1_gray',vutils.make_grid(fake1_gray[0:3,:,:,:], normalize=True,scale_each=True),i + epoch * batch_idxs)
-                writer.add_image('image/fake1_gray_crop',vutils.make_grid(fake_ab1[0:3,3,:,:], normalize=True,scale_each=True),i + epoch * batch_idxs)
-
-            for nl in range(opt.num_layer):
-
-                writer.add_image('image/stable_fake'+str(nl+1),vutils.make_grid(fake1[nl][0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
-
-            writer.add_image('image/stable_real',vutils.make_grid(image_stable1[0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
-        time_end = time.time()
-        time_each=time_end-time_begin
-        time_left=((opt.nEpochs-epoch)*batch_idxs+batch_idxs-i)*time_each/3600
-        print("=>train--Epoch[{}]({}/{}): time(s): {:.4f} Time_left(h): {:.4f}  Learning rate: {:.6f}".format(
-            epoch, i, batch_idxs, time_each, time_left, lr))
-
-def test(epoch,list_stable, list_unstable, list_feature, list_adjacent, list_affine, list_epoch):
-    netG.eval()
-    with_gan = False
-    writer = SummaryWriter(opt.dir_logs)
-
-    random.shuffle(list_epoch)
-    dataset = customData(val_files, list_epoch, list_stable, list_unstable, list_feature, list_affine, list_adjacent, with_gan)
-    sample = torch.utils.data.DataLoader(dataset, batch_size=opt.testBatchSize, shuffle=False, num_workers=opt.threads,pin_memory=True)
-    iter_sample = iter(sample)
-
-    batch_idxs = (int(dataset.__len__())) // opt.testBatchSize
-
-    for i in range(batch_idxs):
-        images1, features1, affine1, images2, features2, affine2, feature_adjacent = next(iter_sample)
-
-        images1 = images1.cuda()
-        images2 = images2.cuda()
-        features1 = features1.cuda().float()
-        features2 = features2.cuda().float()
-        affine1=affine1.cuda().float()
-        affine2=affine2.cuda().float()
-
-        feature_adjacent = feature_adjacent.cuda().float()
-
-        image_stable1, image_unstable1, feature_stable1, feature_unstable1 = pre_propossing(images1, features1)
-
-        image_stable2, image_unstable2, feature_stable2, feature_unstable2 = pre_propossing(images2, features2)
-
-        # real_a.data.resize_(image_unstable1.size()).copy_(image_unstable1)
-        # real_b.data.resize_(image_stable1.size()).copy_(image_stable1)
-
-        # fake_b, grid = netG(real_a)
-
-        fake1 = []
-        fake2 = []
-        grid1 = netG(image_unstable1[:, 0:period + 1, :, :])
-
-        for nl in range(opt.num_layer):
-            grid1[nl] = grid1[nl].permute(0, 2, 3, 1)
-            fake1.append(functional.grid_sample(image_unstable1[:, period + 1:period + 1 + 3, :, :], grid1[nl]))
-
-        grid2 = netG(image_unstable2[:, 0:period + 1, :, :])
-
-        for nl in range(opt.num_layer):
-            grid2[nl] = grid2[nl].permute(0, 2, 3, 1)
-            fake2.append(functional.grid_sample(image_unstable2[:, period + 1:period + 1 + 3, :, :], grid2[nl]))
-
-        loss_mse = 0
-        loss_feature = 0
-        loss_delta = 0
-        loss_vgg = 0
-        loss_g2 = 0
-        for nl in range(opt.num_layer):
-            loss_mse1, loss_delta1, loss_feature1 = loss_calulate(grid1[nl], feature_stable1, feature_unstable1,
-                                                                  fake1[nl], image_stable1,opt.testBatchSize)
-
-            loss_mse2, loss_delta2, loss_feature2 = loss_calulate(grid2[nl], feature_stable2, feature_unstable2,
-                                                                  fake2[nl], image_stable2,opt.testBatchSize)
-            loss_mse += loss_mse1 + loss_mse2
-            loss_feature += loss_feature1 + loss_feature2
-            loss_delta += loss_delta1 + loss_delta2
-            loss_vgg += generator_criterion(fake1[nl].detach(), image_stable1[:,0:3,:,:].detach())
-            loss_vgg += generator_criterion(fake2[nl].detach(), image_stable2[:,0:3,:,:].detach())
-            loss_g2 += torch.mean(torch.abs(fake2[nl] - fake1[nl]))
-
-        loss_g1 = loss_feature + loss_vgg + loss_mse  # + loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
-
-        loss_g = loss_g1 + loss_g2 * opt.lamd
-        print("===> val----Epoch[{}]({}/{})".format(epoch, i, batch_idxs))
-
-        if i % 10 == 0:
-
-            writer.add_scalar('scalar/val_loss_g_adjacent', loss_g2, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/val_loss_g_feature', loss_feature, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/val_loss_vgg', loss_vgg, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/val_delta', loss_delta, i + epoch * batch_idxs)
-            #writer.add_scalar('scalar/loss_affine', loss_affine, i + epoch * batch_idxs)
-            writer.add_scalar('scalar/val_mse', loss_mse, i + epoch * batch_idxs)
-            # writer.add_scalar('scalar/loss', lossG, i + epoch * batch_idxs)
-
-            writer.add_image('image/val_unstable',
-                             vutils.make_grid(image_unstable1[0:3, period + 1:period + 1 + 3, :, :], normalize=True,
-                                              scale_each=True),
-                             i + epoch * batch_idxs)
-            for nl in range(opt.num_layer):
-
-                writer.add_image('image/val_stable_fake'+str(nl+1),
-                                 vutils.make_grid(fake1[nl][0:3, :, :, :], normalize=True, scale_each=True),
-                                 i + epoch * batch_idxs)
-
-            writer.add_image('image/val_stable_real',
-                             vutils.make_grid(image_stable1[0:3, 0:3, :, :], normalize=True, scale_each=True),
-                             i + epoch * batch_idxs)
-
-
-def checkpoint(epoch):
-    if not os.path.exists("checkpoint"):
-        os.mkdir("checkpoint")
-    if not os.path.exists(os.path.join("checkpoint", opt.dataset)):
-        os.mkdir(os.path.join("checkpoint", opt.dataset))
-    state = {'net':netG.state_dict(), 'epoch':epoch}
-
-    net_g_model_out_path = "checkpoint/{}/netG_model_epoch_{}.pth".format(opt.dataset, epoch)
-
-    torch.save(state, net_g_model_out_path)
-    print("Checkpoint saved to {}".format("checkpoint" + opt.dataset))
-
-
-def process():
-    """Test pix2pix"""
-    # record all videos
-
-    class_name = ['Regular', 'QuickRotation', 'Running', 'Parallax', 'Crowd', 'Zooming']
-    crop_ratio = 0.2
-    num_sample = 20
-    stride_sample = 5
-    threshold = 10
-    rate = 0.3
-
-    for ii in range(len(class_name) - 5):
-
-        path = '/data/zmd/demo/datas/' + class_name[ii] + '/'
-        # path = '/data/zmd/DeepStab/DeepStab/unstable_test/'
-
-        list_videos = os.listdir(path)
-
-        # index_sample_test = np.arange(30, 0, -1)
-        index_sample_test = np.append(np.arange(-period // 2, 0, 1), np.arange(0, period // 2 + 1, 1))
-
-        # index_sample_test = [32, 16, 8, 4, 2, 1]#[5, 10, 15, 20, 25, 30]#[1, 2, 4, 8, 16, 32]
-        net_g_model_out_path = "checkpoint/{}/netG_model_epoch_{}.pth".format(opt.dataset, opt.continue_train)
-        checkpoint = torch.load(net_g_model_out_path)
-        netG.load_state_dict(checkpoint['net'])
-        #netG = torch.load('./checkpoint/unet_512_kalman_10_period_30-1515/netG_model_epoch_35.pth')
-        netG.eval()
-
-        for video_id in range(0, len(list_videos)):
-            '''
-            ###calculate cropping
-
-            cap = cv2.VideoCapture(path + list_videos[video_id])
-            num_frame = cap.get(7)
-            fps = cap.get(5)
-            size_origin = (int(cap.get(3)), int(cap.get(4)))
-            size = (256, 256)
-
-            history_frame = []
-            ret, img_init = cap.read()
-            # img_init_resize = cv2.resize(img_init, size, interpolation=cv2.INTER_AREA)
-            # img_init_resize_gray = cv2.cvtColor(img_init_resize, cv2.COLOR_BGR2GRAY)
-
-            for i in range(period // 2 + 1):
-                history_frame.append(img_init)
-            # for i in range(index_sample_test[0]):
-            for i in range(period // 2):
-                ret, img_unstable = cap.read()
-                # img_init_resize = cv2.resize(img_unstable, size, interpolation=cv2.INTER_AREA)
-                history_frame.append(img_unstable)
-            # last=img_init_resize
-            for i in range(int(num_frame)):
-
-                print('calculating cropping:::   video_index: ' + list_videos[video_id] + '  frame_index:  ' + str(i))
-                list_unstable = []
-                # list_stable=[]
-                for j in range(len(index_sample_test)):
-                    list_unstable.append(
-                        cv2.resize(cv2.cvtColor(history_frame[period // 2 + index_sample_test[j]], cv2.COLOR_BGR2GRAY),
-                                   size, interpolation=cv2.INTER_AREA))
-
-                if (i >= int(num_frame) - period // 2):
-                    img_unstable = history_frame[-1]
-
-
-                else:
-                    ret, img_unstable = cap.read()
-                    if ret == False:
-                        continue
-                    # img_unstable = cv2.resize(img_unstable, size, interpolation=cv2.INTER_AREA)
-                # img_unstable_resize=cv2.resize(img_unstable,size,interpolation=cv2.INTER_AREA)
-                # img_unstable_resize = cv2.cvtColor(img_unstable_resize, cv2.COLOR_BGR2RGB)
-                # list_unstable.append(img_unstable_resize)
-                now = cv2.cvtColor(history_frame[period // 2], cv2.COLOR_BGR2RGB)
-                now = now[np.newaxis, :, :, :]
-                now = torch.from_numpy(now)
-                now = now.cuda().float()
-                now = now.float() * (1. / 255) * 2 - 1
-                now = now.permute(0, 3, 1, 2)
-                # np1 = np.array(list_stable)
-                # np2 = np.array(list_unstable).transpose(0, 3, 1, 2).squeeze()
-                # npp = np.concatenate((np1, np2), axis=0)
-
-                npp = np.array(list_unstable)
-                images = npp[np.newaxis, :, :, :]
-
-                images = torch.from_numpy(images)
-                images = images.cuda().float()
-                images = images.float() * (1. / 255) * 2 - 1
-
-                grid = netG(images)
-
-                m = torch.nn.Upsample(scale_factor=(size_origin[1] / 256, size_origin[0] / 256), mode='bilinear')
-                grid_resize = m(grid)
-                grid_resize = grid_resize.permute(0, 2, 3, 1)
-
-                pts1 = []
-                pts2 = []
-                for sample_height in range(num_sample):
-                    for sample_width in range(num_sample):
-                        pts1.append([grid_resize[
-                                         0, size_origin[1] // 2 + (sample_height - num_sample // 2) * stride_sample,
-                                         size_origin[0] // 2 + (
-                                                 sample_width - num_sample // 2) * stride_sample * 2, 0].cpu().detach().numpy(),
-                                     grid_resize[
-                                         0, size_origin[1] // 2 + (sample_height - num_sample // 2) * stride_sample,
-                                         size_origin[0] // 2 + (
-                                                 sample_width - num_sample // 2) * stride_sample * 2, 1].cpu().detach().numpy()])
-                        pts2.append([(size_origin[0] / 2 + (sample_width - num_sample / 2) * stride_sample * 2) /
-                                     size_origin[0] * 2 - 1,
-                                     (size_origin[1] // 2 + (sample_height - num_sample // 2) * stride_sample) /
-                                     size_origin[1] * 2 - 1])
-
-                pts1 = np.array(pts1, dtype=np.float32)
-                pts2 = np.array(pts2, dtype=np.float32)
-
-                M, mask = cv2.findHomography(pts1, pts2, cv2.RANSAC, 3.0)
-
-                pts = np.float32([[-1, -1], [-1, 1], [1, 1], [1, -1]]).reshape(-1, 1, 2)
-
-                dst = cv2.perspectiveTransform(pts, M)
-                if (i == 0):
-                    y_start = 0
-                    x_start = 0
-                    y_end = size_origin[1]
-                    x_end = size_origin[0]
-                else:
-                    if (i > period // 2 and i < num_frame - period // 2):
-                        y_start = (y_start + (max((dst[0, 0, 1] + 1) * size_origin[1] / 2,
-                                                  (dst[3, 0, 1] + 1) * size_origin[
-                                                      1] / 2) - y_start) * rate if y_start < max(
-                            (dst[0, 0, 1] + 1) * size_origin[1] / 2,
-                            (dst[3, 0, 1] + 1) * size_origin[1] / 2) else y_start)
-                        y_end = (y_end - (y_end - min(y_end, min((dst[1, 0, 1] + 1) * size_origin[1] / 2,
-                                                                 (dst[2, 0, 1] + 1) * size_origin[
-                                                                     1] / 2))) * rate if y_end > min(
-                            (dst[1, 0, 1] + 1) * size_origin[1] / 2,
-                            (dst[2, 0, 1] + 1) * size_origin[1] / 2) else y_end)
-                        x_start = (x_start + (max((dst[0, 0, 0] + 1) * size_origin[0] / 2,
-                                                  (dst[1, 0, 0] + 1) * size_origin[
-                                                      0] / 2) - x_start) * rate if x_start < max(
-                            (dst[0, 0, 0] + 1) * size_origin[0] / 2,
-                            (dst[1, 0, 0] + 1) * size_origin[0] / 2) else x_start)
-                        # x_start = max(x_start,max((dst[0, 0, 0] + 1) * size_origin[0] / 2, (dst[1, 0, 0] + 1) * size_origin[0] / 2))
-
-                        x_end = (x_end - (x_end - min(x_end, min((dst[2, 0, 0] + 1) * size_origin[0] / 2,
-                                                                 (dst[3, 0, 0] + 1) * size_origin[
-                                                                     0] / 2))) * rate if x_end > min(
-                            (dst[2, 0, 0] + 1) * size_origin[0] / 2,
-                            (dst[3, 0, 0] + 1) * size_origin[0] / 2) else x_end)
-
-                    # x_end = min(x_end,min((dst[2, 0, 0] + 1) * size_origin[0] / 2, (dst[3, 0, 0] + 1) * size_origin[0] / 2))
-
-                history_frame.pop(0)
-
-                history_frame.append(img_unstable)
-            '''
-            #################calculate cropping##########
-            x_start = 0
-            x_end = 640
-            y_start = 0
-            y_end = 360
-            cap = cv2.VideoCapture(path + list_videos[video_id])
-            num_frame = cap.get(7)
-            fps = cap.get(5)
-            size_origin = (int(cap.get(3)), int(cap.get(4)))
-            # size_crop=(int(cap.get(3)*(1-crop_ratio)),int(cap.get(4)*(1-crop_ratio*1.5)))
-            size = (256, 256)
-            size_crop = (int(x_end) - int(x_start) - threshold * 2, int(y_end) - int(y_start) - threshold * 2)
-            fourcc = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
-            videoWriter = cv2.VideoWriter(
-                './test/stable_diff_frequency_0.1/' + class_name[ii] + '/' + str(list_videos[video_id]) + '.avi',
-                fourcc, int(fps), size_crop)
-            history_frame = []
-            ret, img_init = cap.read()
-            # img_init_resize = cv2.resize(img_init, size, interpolation=cv2.INTER_AREA)
-            # img_init_resize_gray = cv2.cvtColor(img_init_resize, cv2.COLOR_BGR2GRAY)
-
-            for i in range(period // 2 + 1):
-                history_frame.append(img_init)
-            # for i in range(index_sample_test[0]):
-            for i in range(period // 2):
-                ret, img_unstable = cap.read()
-                # img_init_resize = cv2.resize(img_unstable, size, interpolation=cv2.INTER_AREA)
-                history_frame.append(img_unstable)
-            # last=img_init_resize
-            for i in range(int(num_frame)):
-
-                print('video_index: ' + list_videos[video_id] + '  frame_index:  ' + str(i) + '     cropping :' + str(
-                    x_start) + '    ' + str(x_end) + '   ' + str(y_start) + '  ' + str(y_end))
-                list_unstable = []
-                # list_stable=[]
-                for j in range(len(index_sample_test)):
-                    list_unstable.append(
-                        cv2.resize(cv2.cvtColor(history_frame[period // 2 + index_sample_test[j]], cv2.COLOR_BGR2GRAY),
-                                   size, interpolation=cv2.INTER_AREA))
-
-                if (i >= int(num_frame) - period // 2):
-                    img_unstable = history_frame[-1]
-
-
-                else:
-                    ret, img_unstable = cap.read()
-                    if ret == False:
-                        continue
-                    # img_unstable = cv2.resize(img_unstable, size, interpolation=cv2.INTER_AREA)
-                # img_unstable_resize=cv2.resize(img_unstable,size,interpolation=cv2.INTER_AREA)
-                # img_unstable_resize = cv2.cvtColor(img_unstable_resize, cv2.COLOR_BGR2RGB)
-                # list_unstable.append(img_unstable_resize)
-                now = cv2.cvtColor(history_frame[period // 2], cv2.COLOR_BGR2RGB)
-                now = now[np.newaxis, :, :, :]
-                now = torch.from_numpy(now)
-                now = now.cuda().float()
-                now = now.float() * (1. / 255) * 2 - 1
-                now = now.permute(0, 3, 1, 2)
-                # np1 = np.array(list_stable)
-                # np2 = np.array(list_unstable).transpose(0, 3, 1, 2).squeeze()
-                # npp = np.concatenate((np1, np2), axis=0)
-
-                npp = np.array(list_unstable)
-                images = npp[np.newaxis, :, :, :]
-
-                images = torch.from_numpy(images)
-                images = images.cuda().float()
-                images = images.float() * (1. / 255) * 2 - 1
-
-                grid_whole = netG(images)
-                grid=grid_whole[2]
-                m = torch.nn.Upsample(scale_factor=(size_origin[1] / 256, size_origin[0] / 256), mode='bilinear')
-                grid_resize = m(grid)
-                grid_resize = grid_resize.permute(0, 2, 3, 1)
-
-                fake = functional.grid_sample(now, grid_resize)
-
-                # update history_frame
-                # fake_gray=cv2.cvtColor(fake[0,:,:,:].data.cpu().numpy(),cv2.COLOR_BGR2GRAY)
-                # history_frame.pop(0)
-                # history_frame.append(fake_gray)
-
-                samples = fake[0, :, :, :].data.cpu().numpy()
-                samples = (samples + 1) * 127.5
-                samples = samples.transpose((1, 2, 0))
-                # samples = samples.reshape((144, 256,-1))
-                samples = np.array(samples.astype(np.uint8))
-
-                # update history_frame
-                # fake_gray=cv2.cvtColor(samples,cv2.COLOR_BGR2GRAY)
-                history_frame.pop(0)
-
-                history_frame.append(img_unstable)
-
-                # samples_resize=cv2.resize(samples,size_origin,interpolation=cv2.INTER_AREA)
-
-                samples = cv2.cvtColor(samples, cv2.COLOR_BGR2RGB)
-                # samples_resize = samples[int(cap.get(4) * crop_ratio):int(cap.get(4) * crop_ratio ) + int(size_crop[1]),int(cap.get(3) * crop_ratio / 2):int(cap.get(3) * crop_ratio / 2) + int(size_crop[0]), :]
-                samples_resize = samples[int(y_start) + threshold:int(y_end) - threshold,
-                                 int(x_start) + threshold:int(x_end) - threshold, :]
-                samples_resize = cv2.GaussianBlur(samples_resize, (3, 3), 0.2, 0)
-
-                cv2.imshow('show_unstable.jpg', history_frame[period // 2])
-                cv2.imshow('show_stable.jpg', samples_resize)
-                # cv2.imshow('show_crop.jpg',samples_resize)
-                cv2.waitKey(1)
-                videoWriter.write(samples_resize)  # 写视频帧
-
-            videoWriter.release()
-
-
-
-def main():
-    if opt.train:
-        list_stable,list_unstable,list_feature,list_adjacent,list_affine=image_store(train_files)
-        list_stable_val,list_unstable_val,list_feature_val,list_adjacent_val,list_affine_val=image_store(val_files)
-
-        list_epoch = list_random(train_files)
-        list_epoch_val = list_random(val_files)
-
-        for epoch in range(opt.continue_train, opt.nEpochs):
-
-                if epoch % 5 == 1:
-                    test(epoch, list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
-                    checkpoint(epoch)
-
-                lr = opt.lr * 0.1 ** int(epoch / 20)
-                train(epoch, lr,list_stable,list_unstable,list_feature,list_adjacent,list_affine,list_epoch)
-    else:
-        process()
-
-
-if __name__ == '__main__':
-    main()
-
-
-'''
-process()
-'''
+            self.file_writer = FileWriter(logdir=log_dir, **kwargs)
+
+        # Create default bins for histograms, see generate_testdata.py in tensorflow/tensorboard
+        v = 1E-12
+        buckets = []
+        neg_buckets = []
+        while v < 1E20:
+            buckets.append(v)
+            neg_buckets.append(-v)
+            v *= 1.1
+        self.default_bins = neg_buckets[::-1] + [0] + buckets
+
+        self.all_writers = {self.file_writer.get_logdir(): self.file_writer}
+        self.scalar_dict = {}  # {writer_id : [[timestamp, step, value],...],...}
+
+        # TODO (ml7): Remove try-except when PyTorch 1.0 merges PyTorch and Caffe2
+        try:
+            import caffe2
+            from caffe2.python import workspace  # workaround for pytorch/issue#10249
+            self.caffe2_enabled = True
+        except (SystemExit, ImportError):
+            self.caffe2_enabled = False
+
+    def __append_to_scalar_dict(self, tag, scalar_value, global_step,
+                                timestamp):
+        """This adds an entry to the self.scalar_dict datastructure with format
+        {writer_id : [[timestamp, step, value], ...], ...}.
+        """
+        from .x2num import make_np
+        if tag not in self.scalar_dict.keys():
+            self.scalar_dict[tag] = []
+        self.scalar_dict[tag].append([timestamp, global_step, float(make_np(scalar_value))])
+
+    def _check_caffe2(self, item):
+        """
+        Caffe2 users have the option of passing a string representing the name of
+        a blob in the workspace instead of passing the actual Tensor/array containing
+        the numeric values. Thus, we need to check if we received a string as input
+        instead of an actual Tensor/array, and if so, we need to fetch the Blob
+        from the workspace corresponding to that name. Fetching can be done with the
+        following:
+
+        from caffe2.python import workspace (if not already imported)
+        workspace.FetchBlob(blob_name)
+        workspace.FetchBlobs([blob_name1, blob_name2, ...])
+        """
+        # TODO (ml7): Remove caffe2_enabled check when PyTorch 1.0 merges PyTorch and Caffe2
+        return self.caffe2_enabled and isinstance(item, six.string_types)
+
+    def add_scalar(self, tag, scalar_value, global_step=None, walltime=None):
+        """Add scalar data to summary.
+
+        Args:
+            tag (string): Data identifier
+            scalar_value (float or string/blobname): Value to save
+            global_step (int): Global step value to record
+            walltime (float): Optional override default walltime (time.time()) of event
+        """
+        if self._check_caffe2(scalar_value):
+            scalar_value = workspace.FetchBlob(scalar_value)
+        self.file_writer.add_summary(scalar(tag, scalar_value), global_step, walltime)
+
+    def add_scalars(self, main_tag, tag_scalar_dict, global_step=None, walltime=None):
+        """Adds many scalar data to summary.
+
+        Note that this function also keeps logged scalars in memory. In extreme case it explodes your RAM.
+
+        Args:
+            main_tag (string): The parent name for the tags
+            tag_scalar_dict (dict): Key-value pair storing the tag and corresponding values
+            global_step (int): Global step value to record
+            walltime (float): Optional override default walltime (time.time()) of event
+
+        Examples::
+
+            writer.add_scalars('run_14h', {'xsinx':i*np.sin(i/r),
+                                           'xcosx':i*np.cos(i/r),
+                                           'arctanx': numsteps*np.arctan(i/r)}, i)
+            # This call adds three values to the same scalar plot with the tag
+            # 'run_14h' in TensorBoard's scalar section.
+        """
+        walltime = time.time() if walltime is None else walltime
+        fw_logdir = self.file_writer.get_logdir()
+        for tag, scalar_value in tag_scalar_dict.items():
+            fw_tag = fw_logdir + "/" + main_tag + "/" + tag
+            if fw_tag in self.all_writers.keys():
+                fw = self.all_writers[fw_tag]
+            else:
+                fw = FileWriter(logdir=fw_tag)
+                self.all_writers[fw_tag] = fw
+            if self._check_caffe2(scalar_value):
+                scalar_value = workspace.FetchBlob(scalar_value)
+            fw.add_summary(scalar(main_tag, scalar_value), global_step, walltime)
+            self.__append_to_scalar_dict(fw_tag, scalar_value, global_step, walltime)
+
+    def export_scalars_to_json(self, path):
+        """Exports to the given path an ASCII file containing all the scalars written
+        so far by this instance, with the following format:
+        {writer_id : [[timestamp, step, value], ...], ...}
+
+        The scalars saved by ``add_scalars()`` will be flushed after export.
+        """
+        with open(path, "w") as f:
+            json.dump(self.scalar_dict, f)
+        self.scalar_dict = {}
+
+    def add_histogram(self, tag, values, global_step=None, bins='tensorflow', walltime=None):
+        """Add histogram to summary.
+
+        Args:
+            tag (string): Data identifier
+            values (torch.Tensor, numpy.array, or string/blobname): Values to build histogram
+            global_step (int): Global step value to record
+            bins (string): one of {'tensorflow','auto', 'fd', ...}, this determines how the bins are made. You can find
+              other options in: https://docs.scipy.org/doc/numpy/reference/generated/numpy.histogram.html
+            walltime (float): Optional override default walltime (time.time()) of event
+        """
+        if self._check_caffe2(values):
+            values = workspace.FetchBlob(values)
+        if isinstance(bins, six.string_types) and bins == 'tensorflow':
+            bins = self.default_bins
+        self.file_writer.add_summary(histogram(tag, values, bins), global_step, walltime)
+
+    def add_image(self, tag, img_tensor, global_step=None, walltime=None):
+        """Add image data to summary.
+
+        Note that this requires the ``pillow`` package.
+
+        Args:
+            tag (string): Data identifier
+            img_tensor (torch.Tensor, numpy.array, or string/blobname): Image data
+            global_step (int): Global step value to record
+            walltime (float): Optional override default walltime (time.time()) of event
+        Shape:
+            img_tensor: :math:`(3, H, W)`. Use ``torchvision.utils.make_grid()`` to prepare it is a good idea.
+        """
+        if self._check_caffe2(img_tensor):
+            img_tensor = workspace.FetchBlob(img_tensor)
+        self.file_writer.add_summary(image(tag, img_tensor), global_step, walltime)
+
+    def add_image_with_boxes(self, tag, img_tensor, box_tensor, global_step=None,
+                             walltime=None, **kwargs):
+        """Add image boxes data to summary (useful for models such as Detectron).
+
+        Args:
+            tag (string): Data identifier
+            img_tensor (torch.Tensor, numpy.array, or string/blobname): Image data
+            box_tensor (torch.Tensor, numpy.array, or string/blobname): Box data (for detected objects)
+            global_step (int): Global step value to record
+            walltime (float): Optional override default walltime (time.time()) of event
+        """
+        if self._check_caffe2(img_tensor):
+            img_tensor = workspace.FetchBlob(img_tensor)
+        if self._check_caffe2(box_tensor):
+            box_tensor = workspace.FetchBlob(box_tensor)
+        self.file_writer.add_summary(image_boxes(tag, img_tensor, box_tensor, **kwargs), global_step, walltime)
+
+    def add_figure(self, tag, figure, global_step=None, close=True, walltime=None):
+        """Render matplotlib figure into an image and add it to summary.
+
+        Note that this requires the ``matplotlib`` package.
+
+        Args:
+            tag (string): Data identifier
+            figure (matplotlib.pyplot.figure) or list of figures: figure or a list of figures
+            global_step (int): Global step value to record
+            close (bool): Flag to automatically close the figure
+            walltime (float): Optional override default walltime (time.time()) of event
+        """
+        self.add_image(tag, figure_to_image(figure, close), global_step, walltime)
+
+    def add_video(self, tag, vid_tensor, global_step=None, fps=4, walltime=None):
+        """Add video data to summary.
+
+        Note that this requires the ``moviepy`` package.
+
+        Args:
+            tag (string): Data identifier
+            vid_tensor (torch.Tensor): Video data
+            global_step (int): Global step value to record
+            fps (float or int): Frames per second
+            walltime (float): Optional override default walltime (time.time()) of event
+        Shape:
+            vid_tensor: :math:`(B, C, T, H, W)`.
+        """
+        self.file_writer.add_summary(video(tag, vid_tensor, fps), global_step, walltime)
+
+    def add_audio(self, tag, snd_tensor, global_step=None, sample_rate=44100, walltime=None):
+        """Add audio data to summary.
+
+        Args:
+            tag (string): Data identifier
+            snd_tensor (torch.Tensor): Sound data
+            global_step (int): Global step value to record
+            sample_rate (int): sample rate in Hz
+            walltime (float): Optional override default walltime (time.time()) of event
+        Shape:
+            snd_tensor: :math:`(1, L)`. The values should lie between [-1, 1].
+        """
+        if self._check_caffe2(snd_tensor):
+            snd_tensor = workspace.FetchBlob(snd_tensor)
+        self.file_writer.add_summary(audio(tag, snd_tensor, sample_rate=sample_rate), global_step, walltime)
+
+    def add_text(self, tag, text_string, global_step=None, walltime=None):
+        """Add text data to summary.
+
+        Args:
+            tag (string): Data identifier
+            text_string (string): String to save
+            global_step (int): Global step value to record
+            walltime (float): Optional override default walltime (time.time()) of event
+        Examples::
+
+            writer.add_text('lstm', 'This is an lstm', 0)
+            writer.add_text('rnn', 'This is an rnn', 10)
+        """
+        self.file_writer.add_summary(text(tag, text_string), global_step, walltime)
+
+    def add_graph_onnx(self, prototxt):
+        self.file_writer.add_graph_onnx(gg(prototxt))
+
+    # Supports both Caffe2 and PyTorch models
+    def add_graph(self, model, input_to_model=None, verbose=False, **kwargs):
+        # prohibit second call?
+        # no, let tensorboard handles it and show its warning message.
+        """Add graph data to summary.
+
+        Args:
+            model (torch.nn.Module): model to draw.
+            input_to_model (torch.autograd.Variable): a variable or a tuple of variables to be fed.
+
+        """
+        try:
+            # A valid PyTorch model should have a 'forward' method
+            _ = getattr(model, 'forward')
+            import torch
+            from distutils.version import LooseVersion
+            if LooseVersion(torch.__version__) >= LooseVersion("0.3.1"):
+                pass
+            else:
+                if LooseVersion(torch.__version__) >= LooseVersion("0.3.0"):
+                    print('You are using PyTorch==0.3.0, use add_graph_onnx()')
+                    return
+                if not hasattr(torch.autograd.Variable, 'grad_fn'):
+                    print('add_graph() only supports PyTorch v0.2.')
+                    return
+            self.file_writer.add_graph(graph(model, input_to_model, verbose))
+        except AttributeError:
+            # Caffe2 models do not have the 'forward' method
+            if not self.caffe2_enabled:
+                # TODO (ml7): Remove when PyTorch 1.0 merges PyTorch and Caffe2
+                return
+            from caffe2.proto import caffe2_pb2
+            from caffe2.python import core
+            from .caffe2_graph import model_to_graph, nets_to_graph, protos_to_graph
+            # notimporterror should be already handled when checking self.caffe2_enabled
+
+            '''Write graph to the summary. Check model type and handle accordingly.'''
+            if isinstance(model, list):
+                if isinstance(model[0], core.Net):
+                    current_graph, track_blob_names = nets_to_graph(model, **kwargs)
+                elif isinstance(model[0], caffe2_pb2.NetDef):
+                    current_graph, track_blob_names = protos_to_graph(model, **kwargs)
+            # Handles cnn.CNNModelHelper, model_helper.ModelHelper
+            else:
+                current_graph, track_blob_names = model_to_graph(model, **kwargs)
+            event = event_pb2.Event(graph_def=current_graph.SerializeToString())
+            self.file_writer.add_event(event)
+
+    @staticmethod
+    def _encode(rawstr):
+        # I'd use urllib but, I'm unsure about the differences from python3 to python2, etc.
+        retval = rawstr
+        retval = retval.replace("%", "%%%02x" % (ord("%")))
+        retval = retval.replace("/", "%%%02x" % (ord("/")))
+        retval = retval.replace("\\", "%%%02x" % (ord("\\")))
+        return retval
+
+    def add_embedding(self, mat, metadata=None, label_img=None, global_step=None, tag='default', metadata_header=None):
+        """Add embedding projector data to summary.
+
+        Args:
+            mat (torch.Tensor or numpy.array): A matrix which each row is the feature vector of the data point
+            metadata (list): A list of labels, each element will be convert to string
+            label_img (torch.Tensor): Images correspond to each data point
+            global_step (int): Global step value to record
+            tag (string): Name for the embedding
+        Shape:
+            mat: :math:`(N, D)`, where N is number of data and D is feature dimension
+
+            label_img: :math:`(N, C, H, W)`
+
+        Examples::
+
+            import keyword
+            import torch
+            meta = []
+            while len(meta)<100:
+                meta = meta+keyword.kwlist # get some strings
+            meta = meta[:100]
+
+            for i, v in enumerate(meta):
+                meta[i] = v+str(i)
+
+            label_img = torch.rand(100, 3, 10, 32)
+            for i in range(100):
+                label_img[i]*=i/100.0
+
+            writer.add_embedding(torch.randn(100, 5), metadata=meta, label_img=label_img)
+            writer.add_embedding(torch.randn(100, 5), label_img=label_img)
+            writer.add_embedding(torch.randn(100, 5), metadata=meta)
+        """
+        from .x2num import make_np
+        mat = make_np(mat)
+        if global_step is None:
+            global_step = 0
+            # clear pbtxt?
+        # Maybe we should encode the tag so slashes don't trip us up?
+        # I don't think this will mess us up, but better safe than sorry.
+        subdir = "%s/%s" % (str(global_step).zfill(5), self._encode(tag))
+        save_path = os.path.join(self.file_writer.get_logdir(), subdir)
+        try:
+            os.makedirs(save_path)
+        except OSError:
+            print('warning: Embedding dir exists, did you set global_step for add_embedding()?')
+        if metadata is not None:
+            assert mat.shape[0] == len(metadata), '#labels should equal with #data points'
+            make_tsv(metadata, save_path, metadata_header=metadata_header)
+        if label_img is not None:
+            assert mat.shape[0] == label_img.shape[0], '#images should equal with #data points'
+            make_sprite(label_img, save_path)
+        assert mat.ndim == 2, 'mat should be 2D, where mat.size(0) is the number of data points'
+        make_mat(mat, save_path)
+        # new funcion to append to the config file a new embedding
+        append_pbtxt(metadata, label_img, self.file_writer.get_logdir(), subdir, global_step, tag)
+
+    def add_pr_curve(self, tag, labels, predictions, global_step=None,
+                     num_thresholds=127, weights=None, walltime=None):
+        """Adds precision recall curve.
+
+        Args:
+            tag (string): Data identifier
+            labels (torch.Tensor, numpy.array, or string/blobname): Ground truth data. Binary label for each element.
+            predictions (torch.Tensor, numpy.array, or string/blobname):
+            The probability that an element be classified as true. Value should in [0, 1]
+            global_step (int): Global step value to record
+            num_thresholds (int): Number of thresholds used to draw the curve.
+            walltime (float): Optional override default walltime (time.time()) of event
+
+        """
+        from .x2num import make_np
+        labels, predictions = make_np(labels), make_np(predictions)
+        self.file_writer.add_summary(
+            pr_curve(tag, labels, predictions, num_thresholds, weights),
+            global_step, walltime)
+
+    def add_pr_curve_raw(self, tag, true_positive_counts,
+                         false_positive_counts,
+                         true_negative_counts,
+                         false_negative_counts,
+                         precision,
+                         recall,
+                         global_step=None,
+                         num_thresholds=127,
+                         weights=None,
+                         walltime=None):
+        """Adds precision recall curve with raw data.
+
+        Args:
+            tag (string): Data identifier
+            true_positive_counts (torch.Tensor, numpy.array, or string/blobname): true positive counts
+            false_positive_counts (torch.Tensor, numpy.array, or string/blobname): false positive counts
+            true_negative_counts (torch.Tensor, numpy.array, or string/blobname): true negative counts
+            false_negative_counts (torch.Tensor, numpy.array, or string/blobname): false negative counts
+            precision (torch.Tensor, numpy.array, or string/blobname): precision
+            recall (torch.Tensor, numpy.array, or string/blobname): recall
+            global_step (int): Global step value to record
+            num_thresholds (int): Number of thresholds used to draw the curve.
+            walltime (float): Optional override default walltime (time.time()) of event
+            see: https://github.com/tensorflow/tensorboard/blob/master/tensorboard/plugins/pr_curve/README.md
+        """
+        self.file_writer.add_summary(
+            pr_curve_raw(tag,
+                         true_positive_counts,
+                         false_positive_counts,
+                         true_negative_counts,
+                         false_negative_counts,
+                         precision,
+                         recall,
+                         num_thresholds,
+                         weights),
+            global_step,
+            walltime)
+
+    def close(self):
+        if self.file_writer is None:
+            return  # ignore double close
+        self.file_writer.flush()
+        self.file_writer.close()
+        for path, writer in self.all_writers.items():
+            writer.flush()
+            writer.close()
+        self.file_writer = self.all_writers = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
