@@ -79,7 +79,7 @@ def define_D(input_nc, ndf, netD,
 # but it abstracts away the need to create the target label tensor
 # that has the same size as the input
 class GANLoss(nn.Module):
-    def __init__(self, use_lsgan=True, target_real_label=1.0, target_fake_label=0.0):
+    def __init__(self, use_lsgan=True, target_real_label=1.0, target_fake_label=-1.0):
         super(GANLoss, self).__init__()
         self.register_buffer('real_label', torch.tensor(target_real_label))
         self.register_buffer('fake_label', torch.tensor(target_fake_label))
@@ -325,10 +325,10 @@ class NLayerDiscriminator(nn.Module):
         else:
             use_bias = norm_layer == nn.InstanceNorm2d
 
-        kw = 4
+        kw = 3
         padw = 1
         sequence = [
-            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=2, padding=padw),
+            nn.Conv2d(input_nc, ndf, kernel_size=kw, stride=1, padding=padw),
             nn.LeakyReLU(0.2, True)
         ]
 
@@ -340,20 +340,20 @@ class NLayerDiscriminator(nn.Module):
             sequence =sequence+ [
                 nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult,
                           kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-                #norm_layer(ndf * nf_mult),
+                norm_layer(ndf * nf_mult),
                 nn.LeakyReLU(0.2, True)
             ]
 
         nf_mult_prev = nf_mult
         nf_mult = min(2**n_layers, 8)
         sequence =sequence+ [
-            nn.Conv2d(ndf * nf_mult_prev, ndf * nf_mult,
-                      kernel_size=kw, stride=2, padding=padw, bias=use_bias),
-            #norm_layer(ndf * nf_mult),
+            nn.Conv2d(ndf * nf_mult_prev, ndf * 2,
+                      kernel_size=kw, stride=1, padding=padw, bias=use_bias),
+            norm_layer(ndf * 2),
             nn.LeakyReLU(0.2, True)
         ]
 
-        sequence =sequence + [nn.Conv2d(ndf * nf_mult, 1, kernel_size=kw, stride=1, padding=padw)]
+        sequence =sequence + [nn.Conv2d(ndf * 2, 1, kernel_size=kw, stride=1, padding=padw)]
 
         if use_sigmoid:
             sequence =sequence + [nn.Sigmoid()]

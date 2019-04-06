@@ -31,7 +31,7 @@ parser.add_argument('--dir_logs', default='logs', help='logs for tensorboard')
 parser.add_argument('--num_layer', type=int, default=3, help='number of layers for cascading')
 parser.add_argument('--batchSize', type=int, default=4, help='training batch size')
 parser.add_argument('--testBatchSize', type=int, default=2, help='testing batch size')
-parser.add_argument('--nEpochs', type=int, default=60, help='number of epochs to train for')
+parser.add_argument('--nEpochs', type=int, default=40, help='number of epochs to train for')
 parser.add_argument('--input_nc', type=int, default=period + 1, help='input image channels')
 parser.add_argument('--output_nc', type=int, default=2, help='output image channels')
 parser.add_argument('--ngf', type=int, default=32, help='generator filters in first conv layer')
@@ -51,9 +51,11 @@ parser.add_argument('--path_image',default='image512_whole/',help='path of image
 parser.add_argument('--path_adjacent',default='feature_adjacent256/',help='path of adjacent homograpy for train')
 parser.add_argument('--number_feature',type=int,default=400,help='number of feature points for train')
 parser.add_argument('--period_D',type=int,default=3,help='period for discriminator 2*period_D+1')
-parser.add_argument('--balance_gd', type=float, default=1, help='balance of generator loss and discriminator loss')
+parser.add_argument('--balance_gd', type=float, default=2, help='balance of generator loss and discriminator loss')
+parser.add_argument('--affine_weight', type=float, default=10, help='weight of affine loss')
 parser.add_argument('--start_gan', type=int, default=-1, help='epoch of starting gan')
-parser.add_argument('--start_loss_affine', type=int, default=20, help='epoch of starting loss_affine')
+parser.add_argument('--start_loss_affine', type=int, default=10, help='epoch of starting loss_affine')
+
 opt = parser.parse_args()
 print(opt)
 
@@ -81,7 +83,7 @@ print('===> Building model')
 # netG = Net()
 netG = define_G(opt.input_nc, opt.output_nc, opt.ngf, 'normal', 0.02, opt.gpu_ids)
 if opt.use_gan:
-    netD = define_D(2*opt.period_D+1, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False)
+    netD = define_D(2*opt.period_D+1, opt.ndf, 'n_layers', n_layers_D=4, norm='batch', use_sigmoid=False)
 #netD2 = define_D(3 + 3, opt.ndf, 'n_layers', n_layers_D=5, norm='batch', use_sigmoid=False, gpu_ids=[0])
 
 # setup optimizer
@@ -381,7 +383,8 @@ def loss_calulate(grid, feature_stable, feature_unstable, fake, real,batchSize):
     for i in range(batchSize):
         grid_pos = grid[i, ((feature_stable[i, 1, :] + 1) * opt.input_size / 2).int().cpu().numpy(),
                    ((feature_stable[i, 0, :] + 1) * opt.input_size / 2).int().cpu().numpy(), :]
-        feature_loss = feature_loss + torch.mean(torch.abs(feature_unstable[i, 0:2, :] - torch.t(grid_pos)))
+        feature_loss = feature_loss + torch.pow(torch.dist(feature_unstable[i, 0:2, :], torch.t(grid_pos)),2) / opt.number_feature
+        #feature_loss = feature_loss + torch.mean(torch.abs(feature_unstable[i, 0:2, :] - torch.t(grid_pos)))
 
     feature_loss = feature_loss / opt.batchSize
     # loss = mse_loss + args.balance_para * feature_loss
@@ -585,7 +588,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             loss_vgg += generator_criterion(fake2[nl], image_stable2[:,0:3,:,:])
             loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
 
-            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*20
+            loss_affine+=loss_pixel(grid1[nl])+loss_pixel(grid2[nl])*opt.affine_weight
 
 
         # loss_g1 = loss_feature1 + loss_vgg1 + loss_feature2 + loss_vgg2  # +delta# loss_feature#+loss_mse#+10*loss_g_g#loss_g_g  # + loss_g_l1
@@ -626,7 +629,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             writer.add_image('image/stable_real',vutils.make_grid(image_stable1[0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
         time_end = time.time()
         time_each=time_end-time_begin
-        time_left=((opt.nEpochs-epoch)*batch_idxs+batch_idxs-i)*time_each/3600
+        time_left=((opt.nEpochs-epoch-1)*batch_idxs+batch_idxs-i)*time_each/3600
         print("=>train--Epoch[{}]({}/{}): time(s): {:.4f} Time_left(h): {:.4f}  Learning rate: {:.6f}".format(
             epoch, i, batch_idxs, time_each, time_left, lr))
 
@@ -1021,7 +1024,7 @@ def main():
                     test(epoch, list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
                     checkpoint(epoch)
 
-                lr = opt.lr * 0.1 ** int(epoch / 20)
+                lr = opt.lr * 0.1 ** int(epoch / 15)
                 train(epoch, lr,list_stable,list_unstable,list_feature,list_adjacent,list_affine,list_epoch)
     else:
         process()
