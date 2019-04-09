@@ -44,11 +44,15 @@ def init_weights(net, init_type='normal', gain=0.02):
     net.apply(init_func)
 
 
-def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
-    #if len(gpu_ids) > 0:
-    #assert(torch.cuda.is_available())
-    #net.to(gpu_ids[0])
-    net = torch.nn.DataParallel(net)
+def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[],parallel=False):
+
+    if parallel:
+        net = torch.nn.DataParallel(net)
+    else:
+        if len(gpu_ids) > 0:
+            assert (torch.cuda.is_available())
+            net.to(gpu_ids[0])
+            net = torch.nn.DataParallel(net, gpu_ids)
     init_weights(net, init_type, gain=init_gain)
     return net
 
@@ -56,7 +60,7 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
 def define_G(input_nc, output_nc, ngf, init_type='normal', init_gain=0.02, gpu_ids=[]):
 
     net = UnetGenerator(input_nc, output_nc, ngf)
-    return init_net(net, init_type, init_gain, gpu_ids)
+    return init_net(net, init_type, init_gain, gpu_ids,parallel=True)
 
 
 def define_D(input_nc, ndf, netD,
