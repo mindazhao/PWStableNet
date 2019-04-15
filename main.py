@@ -31,11 +31,11 @@ parser.add_argument('--dir_logs', default='logs', help='logs for tensorboard')
 parser.add_argument('--num_layer', type=int, default=3, help='number of layers for cascading')
 parser.add_argument('--batchSize', type=int, default=8, help='training batch size')
 parser.add_argument('--testBatchSize', type=int, default=2, help='testing batch size')
-parser.add_argument('--nEpochs', type=int, default=30, help='number of epochs to train for')
+parser.add_argument('--nEpochs', type=int, default=40, help='number of epochs to train for')
 parser.add_argument('--input_nc', type=int, default=period + 1, help='input image channels')
 parser.add_argument('--output_nc', type=int, default=2, help='output image channels')
 parser.add_argument('--ngf', type=int, default=32, help='generator filters in first conv layer')
-parser.add_argument('--ndf', type=int, default=16, help='discriminator filters in first conv layer')
+parser.add_argument('--ndf', type=int, default=32, help='discriminator filters in first conv layer')
 parser.add_argument('--lr', type=float, default=0.0002, help='Learning Rate. Default=0.002')
 parser.add_argument('--beta1', type=float, default=0.5, help='beta1 for adam. default=0.5')
 parser.add_argument('--cuda', default=True, action='store_true', help='use cuda?')
@@ -51,10 +51,10 @@ parser.add_argument('--path_image',default='image512_whole/',help='path of image
 parser.add_argument('--path_adjacent',default='feature_adjacent256/',help='path of adjacent homograpy for train')
 parser.add_argument('--number_feature',type=int,default=400,help='number of feature points for train')
 parser.add_argument('--period_D',type=int,default=3,help='period for discriminator 2*period_D+1')
-parser.add_argument('--balance_gd', type=float, default=1, help='balance of generator loss and discriminator loss (2 is ok)')
-parser.add_argument('--affine_weight', type=float, default=10, help='weight of affine loss')
-parser.add_argument('--start_gan', type=int, default=0, help='epoch of starting gan')
-parser.add_argument('--start_loss_affine', type=int, default=5, help='epoch of starting loss_affine')
+parser.add_argument('--balance_gd', type=float, default=0.1, help='balance of generator loss and discriminator loss (2 is ok)')
+parser.add_argument('--affine_weight', type=float, default=5, help='weight of affine loss')
+parser.add_argument('--start_gan', type=int, default=40, help='epoch of starting gan')
+parser.add_argument('--start_loss_affine', type=int, default=10, help='epoch of starting loss_affine')
 
 opt = parser.parse_args()
 print(opt)
@@ -98,6 +98,7 @@ if opt.cuda:
     torch.cuda.manual_seed_all(opt.seed)
     if opt.use_gan:
         criterionGAN.cuda()
+
 
 def list_random_batchsize(files):
     list_random = []
@@ -342,13 +343,25 @@ def loss_pixel(grid):
     #grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
     grid=grid.permute(0,3,1,2)
     # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
-    variation=grid-stable
 
-    delta_x = torch.abs(variation[:, :, 0: -1, :] - variation[:, :, 1:,:])
-    delta_y = torch.abs(variation[:, :, :, 0: -1] - variation[:, :,:, 1:])
+    pooling_size=[1,8,32]
+    stride_size=[1,4,16]
+    delta=0
+    for i in range(3):
+        pooling_operation = nn.AvgPool2d(pooling_size[i], stride=stride_size[i],padding=stride_size[i]//2)
+        grid_temp=pooling_operation(grid)
+        stable_temp=pooling_operation(stable)
 
-    delta = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
 
+
+        variation=grid_temp-stable_temp
+
+        delta_x = torch.abs(variation[:, :, 0: -1, :] - variation[:, :, 1:,:])
+        delta_y = torch.abs(variation[:, :, :, 0: -1] - variation[:, :,:, 1:])
+
+        delta_temp = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
+
+        delta+=delta_temp
 
     '''
     loss = 0
@@ -696,7 +709,7 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
 
             for nl in range(opt.num_layer):
 
-                writer.add_image('image/stable_fake'+str(nl+1),vutils.make_grid(fake2[nl][0:3, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
+                writer.add_image('image/stable_fake'+str(nl+1),vutils.make_grid(fake2[nl][5:8, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
 
             writer.add_image('image/stable_real',vutils.make_grid(image_stable2[5:8, 0:3, :, :], normalize=True, scale_each=True),i + epoch * batch_idxs)
         time_end = time.time()
