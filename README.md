@@ -32,14 +32,7 @@ zmd1992@mail.ustc.edu.cn
 The dataset for is the DeepStab dataset (7.9GB) http://cg.cs.tsinghua.edu.cn/download/DeepStab.zip thanks to Miao Wang [1]. 
 
 ## Training 
-- First download the fc-reduced [VGG-16](https://arxiv.org/abs/1409.1556) PyTorch base network weights at:              https://s3.amazonaws.com/amdegroot-models/vgg16_reducedfc.pth
-- By default, we assume you have downloaded the file in the `/weights` dir:
-
-```Shell
-mkdir weights
-cd weights
-wget https://s3.amazonaws.com/amdegroot-models/vgg16_reducedfc.pth
-```
+- The code will download the [VGG-16](https://arxiv.org/abs/1409.1556) PyTorch base network weights at:             https://download.pytorch.org/models/vgg16-397923af.pth automatically.
 
 - To train PWNet using the train script simply specify the parameters listed in `./lib/cfg.py` as a flag or manually change them.
 - The default parameters are set for the use of two NVIDIA 1080Ti graphic cards with 24G memory.
