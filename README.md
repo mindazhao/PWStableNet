@@ -26,6 +26,7 @@ zmd1992@mail.ustc.edu.cn
 - pytorch 0.4.0+
 - numpy
 - cv2
+- ...
 
 ## Datasets
 The dataset for is the DeepStab dataset (7.9GB) http://cg.cs.tsinghua.edu.cn/download/DeepStab.zip thanks to Miao Wang [1]. 
