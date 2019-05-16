@@ -52,15 +52,6 @@ CUDA_VISIBLE_DEVICES=0,1 python3 main.py
   * For training, an NVIDIA GPU is strongly recommended for speed.
   * Before training, you should ensure the location of preprocessed dataset, which will be supplied soon.
 
-## Evaluation
-To evaluate a trained network:
-
-```Shell
-python eval.py
-```
-
-You can specify the parameters listed in the `eval.py` file by flagging them or manually changing them.
-
 
 ## Performance
 
