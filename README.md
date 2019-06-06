@@ -56,7 +56,7 @@ Deep Generative Adversarial Networks
   
 
 <video id="video" controls="" preload="none">
-  <source id="mp4" src="https://github.com//mindazhao//pix-pix-warping-video-stabilization//blob//modified//example.mp4" 
+  <source id="mp4" src="https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/example.mp4" 
   type="video/mp4"> 
 </video> 
 
