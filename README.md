@@ -55,7 +55,7 @@ Deep Generative Adversarial Networks
 - Here we show a example videos to compare our PWNet with StabNet [1]
   
 
-<video id="video" controls="" preload="none" poster="http://om2bks7xs.bkt.clouddn.com/2017-08-26-Markdown-Advance-Video.jpg"> <source id="avi" src="https://github.com/mindazhao/pix-pix-warping-video-stabilization/example.avi" type="video/avi"> </video> 
+<video id="video" controls="" preload="none" poster="https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/example.jpg"> <source id="avi" src="https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/example.avi" type="video/avi"> </video> 
 
 
 
