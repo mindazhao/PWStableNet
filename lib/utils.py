@@ -5,8 +5,31 @@ from torch.utils.data import Dataset, DataLoader
 import cv2
 import itertools
 from lib.cfg import *
+from torch import nn
+from torchvision.models.vgg import vgg16
 
+class GeneratorLoss(nn.Module):
+    def __init__(self):
+        super(GeneratorLoss, self).__init__()
+        vgg = vgg16(pretrained=True)
+        loss_network = nn.Sequential(*list(vgg.features)[:31]).eval()
+        loss_network = torch.nn.DataParallel(loss_network)
+        for param in loss_network.parameters():
+            param.requires_grad = False
+        self.loss_network = loss_network
+        self.mse_loss = nn.MSELoss()
+        #self.tv_loss = TVLoss()
 
+    def forward(self, out_images, target_images):
+        # Adversarial Loss
+        # adversarial_loss = torch.mean(1 - out_labels)
+        # Perception Loss
+        perception_loss = self.mse_loss(self.loss_network(out_images), self.loss_network(target_images))
+        # Image Loss
+        # image_loss = self.mse_loss(out_images, target_images)
+        # TV Loss
+        #tv_loss = self.tv_loss(out_images)
+        return perception_loss# + 2e-8 * tv_loss
 def list_random_batchsize(files):
     list_random = []
 
@@ -70,7 +93,6 @@ def image_store(files):#store all images and features in memory for accelarating
         numframe = list(map(int, f.readline().split()))[0]
         f_adjacent.readline()
         for i in range(0, numframe):
-
             image_path_unstable = opt.path_image+'unstable/' + str(files[video_id]) + '.avi/'
             image_path_stable = opt.path_image+'stable/' + str(files[video_id]) + '.avi/'
             image_path_unstable_one = image_path_unstable + str(i) + '.png'
@@ -233,227 +255,27 @@ def pre_propossing(images, features):
 
 
 def loss_pixel(grid,affine):
-    # target_height = opt.input_size
-    # target_width = opt.input_size
-    # HW = target_height * target_width
-    # target_coordinate = list(itertools.product(range(target_height), range(target_width)))
-    # target_coordinate = torch.Tensor(target_coordinate)  # HW x 2
-    # Y, X = target_coordinate.split(1, dim=1)
-    # Y = Y * 2 / (target_height - 1) - 1
-    # X = X * 2 / (target_width - 1) - 1
-    # target_coordinate = torch.cat([X, Y], dim=1)  # convert from (y, x) to (x, y)
-    # #One = torch.ones(X.size())
-    # stable = target_coordinate#torch.cat([target_coordinate, One], dim=1)
-    # stable = stable.expand(opt.batchSize, target_height * target_width, 2).permute(0, 2, 1)
-    # stable=stable.reshape([opt.batchSize,2, opt.input_size,opt.input_size])
-    # stable = stable.cuda()
-    #grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
-    #grid=grid.permute(0,3,1,2)
-    # affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
-
-    boundary = [[-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]]
-    boundary = torch.Tensor(boundary)
-    boundary = boundary.expand(opt.batchSize, 4, 3).permute(0, 2, 1)
-    boundary = boundary.cuda().float()
-    affine = affine.view(-1, 2, 3)
-    bound_batch = torch.matmul(affine, boundary.float())
-    x_start = bound_batch[:, 0, [0, 2]].cpu().numpy()
-    x_end = bound_batch[:, 0, [1, 3]].cpu().numpy()
-    y_start = bound_batch[:, 1, [0, 1]].cpu().numpy()
-    y_end = bound_batch[:, 1, [2, 3]].cpu().numpy()
-
-    homo_loss=0
-    homo_loss1=0
-    for i in range(opt.batchSize):
-        x_s = max(max(x_start[i]), -1)
-        x_e = min(min(x_end[i]), 1)
-        y_s = max(max(y_start[i]), -1)
-        y_e = min(min(y_end[i]), 1)
+    target_height = opt.input_size
+    target_width = opt.input_size
+    HW = target_height * target_width
+    target_coordinate = list(itertools.product(range(target_height), range(target_width)))
+    target_coordinate = torch.Tensor(target_coordinate)  # HW x 2
+    Y, X = target_coordinate.split(1, dim=1)
+    Y = Y * 2 / (target_height - 1) - 1
+    X = X * 2 / (target_width - 1) - 1
+    target_coordinate = torch.cat([X, Y], dim=1)  # convert from (y, x) to (x, y)
+    #One = torch.ones(X.size())
+    stable = target_coordinate#torch.cat([target_coordinate, One], dim=1)
+    stable = stable.expand(opt.batchSize, target_height * target_width, 2).permute(0, 2, 1)
+    stable=stable.reshape([opt.batchSize,2, opt.input_size,opt.input_size])
+    stable = stable.cuda()
+    grid_reshape = grid.view(-1, target_height * target_width, 2).permute(0, 2, 1)
+    # grid=grid.permute(0,3,1,2)
+    affine_loss = torch.mean(torch.abs(torch.matmul(affine, stable.float()) - grid_reshape.float()))
 
 
 
-
-        # pts1 = []
-        # pts2 = []
-
-        sample_num = 3
-        random_loc = np.random.rand(1, 4)  # x,y,w,h
-        crop_thres=0
-        # pts1 = torch.FloatTensor(pow(sample_num, 2) * 2, 8).cuda()
-        # pts2 = torch.FloatTensor(pow(sample_num, 2) * 2, 1).cuda()
-
-        pts11=torch.tensor([]).cuda()
-        pts21=torch.tensor([]).cuda()
-        x_e=int((x_e+1)*opt.input_size/2)-sample_num-crop_thres
-        x_s = int(max(min((x_s + 1) * opt.input_size / 2+crop_thres, x_e), 0))
-        y_e =int((y_e + 1) * opt.input_size / 2)-sample_num-crop_thres
-        y_s = int(max(min((y_s + 1) * opt.input_size / 2+crop_thres, y_e), 0))
-
-        x_random = int(x_s + (x_e - x_s) * random_loc[0][0])
-        w_sample = int(max(((x_e - x_random) * random_loc[0][2]) // sample_num, 1))
-        y_random = int(y_s + (y_e - y_s) * random_loc[0][1])
-        h_sample = int(max(((y_e - y_random) * random_loc[0][3]) // sample_num, 1))
-        index=-1
-        list_xy=[]
-        for x in np.arange(x_random,x_random+sample_num*w_sample,w_sample):
-            for y in np.arange(y_random,y_random+sample_num*h_sample,h_sample):
-
-                list_xy.append([x,y])
-
-
-
-                #
-                index=index+1
-                # X = grid[i, x, y, 0].cpu().detach().numpy()
-                # Y = grid[i, x, y, 1].cpu().detach().numpy()
-                # Xp = float(x) / opt.input_size*2 - 1
-                # Yp = float(y) / opt.input_size*2 - 1
-                # pts1[index]=torch.tensor([grid[i, y, x, 0],grid[i, y, x, 1],1,0,0,0,-Xp *grid[i, y, x, 0] , -Xp * grid[i, y, x, 1]],dtype=torch.float)
-                # pts2[index] = Xp
-                # index=index+1
-                # pts1[index] = torch.tensor([0,0,0,grid[i, y, x, 0], grid[i, y, x, 1], 1, -Yp * grid[i, y, x, 0], -Yp * grid[i, y, x, 1]],dtype=torch.float)
-                # pts2[index] = Yp
-                # pts1.append([X, Y, 1, 0, 0, 0, -Xp * X, -Xp * Y])
-                # pts1.append([0, 0, 0, X, Y, 1, -Yp * X, -Yp * Y])
-                # pts2.append(Xp)
-                # pts2.append(Yp)
-
-
-        list_xy_float=np.array(list_xy, dtype=np.float32)
-        list_xy = np.array(list_xy, dtype=np.int32)
-        #
-        Xp=list_xy_float[:,0]/opt.input_size*2-1
-        Yp=list_xy_float[:,1]/opt.input_size*2-1
-        Xp_tensor=torch.from_numpy(Xp).view(pow(sample_num,2),1).cuda()
-        Yp_tensor=torch.from_numpy(Yp).view(pow(sample_num,2),1).cuda()
-        tensor_one=torch.ones(pow(sample_num,2),1).cuda()
-        tensor_zero=torch.zeros(pow(sample_num,2),3).cuda()
-        grid0=(grid[i,list_xy[:,1],list_xy[:,0],0].view(pow(sample_num,2),1))
-        grid1=(grid[i,list_xy[:,1],list_xy[:,0],1].view(pow(sample_num, 2),1))
-        # # print(grid[i,list_xy[0,1],list_xy[0,0],0])
-        # # print(grid[i, list_xy[0, 1], list_xy[0, 0], 1])
-        # # print(list_xy[0])
-        #
-        #
-
-
-        pts11=torch.cat((pts11,torch.cat((grid0,grid1,tensor_one,tensor_zero,torch.mul(-Xp_tensor,grid0),torch.mul(-Xp_tensor,grid1)),1)),0)
-        pts21=torch.cat((pts21,Xp_tensor),0)
-        pts11 = torch.cat((pts11,torch.cat((tensor_zero,grid0, grid1, tensor_one, torch.mul(-Yp_tensor, grid0), torch.mul(-Yp_tensor, grid1)),1)),0)
-        pts21 = torch.cat((pts21, Yp_tensor),0)
-        pts11=pts11.double()
-        pts21=pts21.double()
-        grid1 = grid1.double()
-        grid0 = grid0.double()
-        # pts1.requires_grad = True
-        # pts2.requires_grad = True
-        # if torch.det(torch.matmul(torch.t(pts1),pts1))>0:
-        #     A=torch.matmul(pts1,torch.matmul(torch.matmul(torch.inverse(torch.matmul(torch.t(pts1),pts1)),torch.t(pts1)),pts2))
-        #     homo_loss+=torch.dist(A,pts2,2)*np.exp(-max(w_sample,h_sample)/10)
-
-
-        if torch.det(torch.matmul(torch.t(pts11), pts11)) > 0:
-
-
-            H=torch.matmul(torch.matmul(torch.inverse(torch.matmul(torch.t(pts11), pts11)), torch.t(pts11)),pts21)
-
-            # H1=torch.matmul(torch.inverse(pts11),pts21)
-
-            # pts111=pts11.clone()
-            # pts211=pts21.clone()
-            # for p in range(4):
-            #     pts111[2*p]=pts11[p]
-            #     pts111[2*p+1]=pts11[p+4]
-            #     pts211[2 * p] = pts21[p]
-            #     pts211[2 * p + 1] = pts21[p + 4]
-            #
-            # H11 = torch.matmul(torch.matmul(torch.inverse(torch.matmul(torch.t(pts111), pts111)), torch.t(pts111)), pts211)
-            # H111 = torch.matmul(torch.inverse(pts111), pts211)
-
-            #fenzi = torch.matmul(pts11,torch.matmul(torch.matmul(torch.inverse(torch.matmul(torch.t(pts11), pts11)), torch.t(pts11)),pts21))
-            fenmu = torch.tensor([]).cuda()
-            fenmu=fenmu.double()
-            fenzi = torch.tensor([]).cuda()
-            fenzi = fenzi.double()
-            af = torch.tensor([]).cuda()
-            af = af.double()
-            affine=affine.double()
-            for p in range(pow(sample_num,2)):
-                    fenzi=torch.cat((fenzi,H[0]*grid0[p]+H[1]*grid1[p]+H[2]))
-                    fenmu=torch.cat((fenmu,H[6]*grid0[p]+H[7]*grid1[p]+1))
-                    af=torch.cat((af,affine[i,0,0]*grid0[p]+affine[i,0,1]*grid1[p]+affine[i,0,2]))
-
-            for p in range(pow(sample_num, 2)):
-                    fenzi = torch.cat((fenzi, H[3] * grid0[p] + H[4] * grid1[p] + H[5]))
-                    fenmu = torch.cat((fenmu, H[6] * grid0[p] + H[7] * grid1[p] + 1))
-                    af = torch.cat((af, affine[i,1, 0] * grid0[p] + affine[i,1, 1] * grid1[p] + affine[i,1, 2]))
-            fenmu=fenmu.view(pow(sample_num,2)*2,1)
-            fenzi = fenzi.view(pow(sample_num, 2) * 2, 1)
-            # fenzi=fenzi.double()
-            # fenmu=fenmu.double()
-            result=torch.mul(fenzi,1/fenmu)
-            # if torch.dist(result, pts21, 2)<0.1:
-            af=af.view(pow(sample_num,2)*2,1)
-            if torch.dist(result, af, 2)<0.05:
-                homo_loss += torch.dist(result, pts21, 2)* (np.exp(min(w_sample, h_sample) /opt.input_size*2)-1)
-                print("yse")
-            #else:
-            #    print("wrong matching\n")
-        # if np.linalg.det(np.dot(pts1.T, pts1)) != 0:
-        #     #print (np.linalg.norm(np.dot(np.dot(pts1, np.linalg.inv(np.dot(pts1.T, pts1))), np.dot(pts1.T, pts2)) - pts2))
-        #     homo_loss += np.linalg.norm(np.dot(np.dot(pts1, np.linalg.inv(np.dot(pts1.T, pts1))), np.dot(pts1.T, pts2)) - pts2)*np.exp(-max(w_sample,h_sample)/10)
-
-
-
-
-    # pooling_size=[1,8,32]
-    # stride_size=[1,4,16]
-    # delta=0
-    # for i in range(3):
-    #     pooling_operation = nn.AvgPool2d(pooling_size[i], stride=stride_size[i],padding=stride_size[i]//2)
-    #     grid_temp=pooling_operation(grid)
-    #     stable_temp=pooling_operation(stable)
-    #
-    #
-    #
-    #     variation=grid_temp-stable_temp
-    #
-    #     delta_x = torch.abs(variation[:, :, 0: -1, :] - variation[:, :, 1:,:])
-    #     delta_y = torch.abs(variation[:, :, :, 0: -1] - variation[:, :,:, 1:])
-    #
-    #     delta_temp = (torch.mean(delta_x) + torch.mean(delta_y)) / 2
-    #
-    #     delta+=delta_temp
-
-    '''
-    loss = 0
-    for i in range(opt.batchSize):
-        pts1 = []  # XX
-        pts2 = []  # YY
-
-        for sample_height in range(200):
-            x = random.randint(0, 255)
-            y = random.randint(0, 255)
-            X = grid[i, x, y, 0].cpu().detach().numpy()
-            Y = grid[i, x, y, 1].cpu().detach().numpy()
-            Xp = float(x) / 128 - 1
-            Yp = float(y) / 128 - 1
-
-            pts1.append([X, Y, 1, 0, 0, 0, -Xp * X, -Xp * Y])
-            pts1.append([0, 0, 0, X, Y, 1, -Yp * X, -Yp * Y])
-
-            pts2.append(Xp)
-            pts2.append(Yp)
-
-        pts1 = np.array(pts1, dtype=np.float32)
-        pts2 = np.array(pts2, dtype=np.float32)
-
-        loss += np.linalg.norm(np.dot(np.dot(pts1, np.linalg.inv(np.dot(pts1.T, pts1))), np.dot(pts1.T, pts2)) - pts2)
-
-    loss = loss / opt.batchSize / opt.number_feature
-    '''
-
-    return homo_loss
+    return affine_loss
 def frame_clip(sequence, affine):
     sequence_tensor=torch.Tensor(sequence.size())
     boundary = [[-1, -1, 1], [1, -1, 1], [-1, 1, 1], [1, 1, 1]]
@@ -579,3 +401,47 @@ def generate_maps(grid,batchsize=opt.batchSize):
     stable=stable.reshape([batchsize, opt.input_size,opt.input_size,2])
     grid=grid+stable.permute(0,3,1,2).cuda()
     return grid
+
+def loss_pixel1(B_grid,grid_eye,A_tensor_whole,W,H,size):
+
+    # B_grid = grid-grid_eye
+    # loss_affine=0
+    B_tensor=torch.Tensor().cuda().to(torch.float64)
+    A_tensor=torch.Tensor().cuda().to(torch.float64)
+    B_grid=B_grid.to(torch.float64)
+
+    for i in range(H):
+         for j in range(W):
+             B_tensor_temp = torch.reshape(B_grid[:, size // H * i:size // H * (i + 1), size // W * j:size // W * (j + 1), :],[opt.batchSize, size // H * size // W, 2])
+             A_tensor_temp = torch.reshape(A_tensor_whole[:, size // H * i:size // H * (i + 1), size // W * j:size // W * (j + 1), :, :],[opt.batchSize, size // H * size // W, -1])
+             B_tensor = torch.cat((B_tensor,B_tensor_temp),dim=0)
+             A_tensor = torch.cat((A_tensor, A_tensor_temp), dim=0)
+
+
+    AB = torch.bmm(A_tensor, torch.bmm(torch.bmm(torch.inverse(torch.bmm(A_tensor.permute(0, 2, 1), A_tensor)), A_tensor.permute(0, 2, 1)), B_tensor))
+    loss_affine = torch.dist(AB, B_tensor, 1).to(torch.float32)
+    B_grid = B_grid.to(torch.float32)
+
+    return loss_affine
+
+def generate_affine_matrix(width,height):
+    x2 = width - 1
+    y2 = height - 1
+    x1 = 0
+    y1 = 0
+    y = np.arange(height).reshape([height, -1])
+    y = np.tile(y, (1, width))
+    x = np.arange(width)
+    x = np.tile(x, (height, 1))
+
+    xy = np.dstack((x, y)).reshape(height * width, -1)
+    Q11 = ((x2 - xy[:, 0]) * (y2 - xy[:, 1]) / (x2 * y2)).reshape(height, width, 1)
+    Q21 = ((xy[:, 0] - x1) * (y2 - xy[:, 1]) / (x2 * y2)).reshape(height, width, 1)
+    Q12 = ((x2 - xy[:, 0]) * (xy[:, 1] - y1) / (x2 * y2)).reshape(height, width, 1)
+    Q22 = ((xy[:, 0] - x1) * (xy[:, 1] - y1) / (x2 * y2)).reshape(height, width, 1)
+    Q = np.concatenate((Q11, Q21, Q12, Q22), axis=2)
+    # QQ=np.repeat(np.expand_dims(Q,axis=2),2,axis=2)
+    QQ = np.expand_dims(Q, axis=2)
+
+    QQQ = np.tile(QQ, (width, height, 1, 1))
+    return QQQ

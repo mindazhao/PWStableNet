@@ -2,6 +2,7 @@ import torch
 import torch.nn as nn
 from torch.nn import init
 import functools
+from lib.cfg import opt
 from torch.optim import lr_scheduler
 
 ###############################################################################
@@ -44,23 +45,18 @@ def init_weights(net, init_type='normal', gain=0.02):
     net.apply(init_func)
 
 
-def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[],parallel=False):
+def init_net(net, init_type='normal', init_gain=0.02,parallel=False):
 
     if parallel:
         net = torch.nn.DataParallel(net)
-    else:
-        if len(gpu_ids) > 0:
-            assert (torch.cuda.is_available())
-            net.to(gpu_ids[0])
-            net = torch.nn.DataParallel(net, gpu_ids)
     init_weights(net, init_type, gain=init_gain)
     return net
 
 
-def define_G(input_nc, output_nc, ngf, init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_G(input_nc, output_nc, ngf, init_type='normal', init_gain=0.02):
 
     net = UnetGenerator(input_nc, output_nc, ngf)
-    return init_net(net, init_type, init_gain, gpu_ids,parallel=True)
+    return init_net(net, init_type, init_gain,parallel=True)
 
 
 def define_D(input_nc, ndf, netD,
@@ -231,36 +227,48 @@ class UnetGenerator(nn.Module):
 
 
 class down(nn.Module):
-    def __init__(self, input_nc, output_nc,kernal_size=3, stride=2, padding=1, use_bias=True,norm_layer=nn.BatchNorm2d,out=False):
+    def __init__(self, input_nc, output_nc,kernal_size=3, stride=2, padding=1, use_bias=True,use_BN=opt.use_BN,out=False):
         super(down, self).__init__()
         downconv = nn.Conv2d(input_nc, output_nc, kernel_size=kernal_size,
                              stride=stride, padding=padding, bias=use_bias)
         downrelu = nn.LeakyReLU(0.2, True)
-        downnorm = norm_layer(output_nc)
-        uprelu = nn.ReLU(True)
+
         if out:
-            self.mpconv = nn.Sequential(downconv,downnorm,nn.Tanh())
+            if use_BN:
+                self.mpconv = nn.Sequential(downconv,nn.BatchNorm2d(output_nc),nn.Tanh())
+            else:
+                self.mpconv = nn.Sequential(downconv, nn.Tanh())
         else:
-            self.mpconv = nn.Sequential(downconv,downnorm,downrelu)
+            if use_BN:
+                self.mpconv = nn.Sequential(downconv,nn.BatchNorm2d(output_nc),downrelu)
+            else:
+                self.mpconv = nn.Sequential(downconv, downrelu)
     def forward(self, x):
         x = self.mpconv(x)
         return x
 
 class down_bottom(nn.Module):
-    def __init__(self, input_nc, output_nc,kernal_size=3, stride=2, padding=1, use_bias=True,norm_layer=nn.BatchNorm2d,left_input=True):
+    def __init__(self, input_nc, output_nc,kernal_size=3, stride=2, padding=1, use_bias=True,use_BN=opt.use_BN,left_input=True):
         super(down_bottom, self).__init__()
         downconv = nn.Conv2d(input_nc*2, output_nc, kernel_size=kernal_size,
                              stride=stride, padding=padding, bias=use_bias)
         downrelu = nn.LeakyReLU(0.2, True)
-        downnorm = norm_layer(output_nc)
 
-
-        self.conv_same = nn.Sequential(nn.Conv2d(input_nc, input_nc, kernel_size=kernal_size, stride=1, padding=padding, bias=use_bias),norm_layer(input_nc), downrelu)
-        if left_input:
-
-            self.mpconv = nn.Sequential(downconv,downnorm,downrelu)
+        if use_BN:
+            self.conv_same = nn.Sequential(nn.Conv2d(input_nc, input_nc, kernel_size=kernal_size, stride=1, padding=padding, bias=use_bias), nn.BatchNorm2d(input_nc),downrelu)
         else:
-            self.mpconv = nn.Sequential(nn.Conv2d(input_nc, output_nc, kernel_size=kernal_size,stride=stride, padding=padding, bias=use_bias), downnorm, downrelu)
+            self.conv_same = nn.Sequential(nn.Conv2d(input_nc, input_nc, kernel_size=kernal_size, stride=1, padding=padding, bias=use_bias), downrelu)
+
+        if left_input:
+            if use_BN:
+                self.mpconv = nn.Sequential(downconv, nn.BatchNorm2d(output_nc), downrelu)
+            else:
+                self.mpconv = nn.Sequential(downconv, downrelu)
+        else:
+            if use_BN:
+                self.mpconv = nn.Sequential(nn.Conv2d(input_nc, output_nc, kernel_size=kernal_size, stride=stride, padding=padding,bias=use_bias),nn.BatchNorm2d(output_nc), downrelu)
+            else:
+                self.mpconv = nn.Sequential(nn.Conv2d(input_nc, output_nc, kernel_size=kernal_size,stride=stride, padding=padding, bias=use_bias),  downrelu)
 
         self.left_input=left_input
 
@@ -275,18 +283,17 @@ class down_bottom(nn.Module):
 
 
 class up(nn.Module):
-    def __init__(self, input_nc, output_nc, use_bias=True, norm_layer=nn.BatchNorm2d, out=False):
+    def __init__(self, input_nc, output_nc, use_bias=True, use_BN=opt.use_BN, out=False):
         super(up, self).__init__()
 
         uprelu = nn.ReLU(True)
-        upnorm = norm_layer(output_nc)
         upconv = nn.ConvTranspose2d(input_nc, output_nc,
                                     kernel_size=4, stride=2,
                                     padding=1, bias=use_bias)
-
-        upp = [upconv, upnorm, uprelu]
-
-        self.mpconv = nn.Sequential(*upp)
+        if use_BN:
+            self.mpconv = nn.Sequential(upconv, nn.BatchNorm2d(output_nc), uprelu)
+        else:
+            self.mpconv = nn.Sequential(upconv, uprelu)
 
         self.out = out
 
@@ -299,21 +306,23 @@ class up(nn.Module):
 
 
 class up_bottom(nn.Module):
-    def __init__(self, input_nc, output_nc, inner_nc, use_bias=True, norm_layer=nn.BatchNorm2d, out=False):
+    def __init__(self, input_nc, output_nc, inner_nc, use_bias=True, use_BN=opt.use_BN, out=False):
         super(up_bottom, self).__init__()
 
         uprelu = nn.ReLU(True)
-        upnorm = norm_layer(output_nc)
+        # upnorm = norm_layer(output_nc,affine=True, track_running_stats=True)
         upconv = nn.ConvTranspose2d(inner_nc, output_nc,
                                     kernel_size=4, stride=2,
                                     padding=1, bias=use_bias)
-        upp = [upconv, upnorm, uprelu]
-
-        self.mpconv = nn.Sequential(*upp)
+        if use_BN:
+            self.mpconv = nn.Sequential(upconv, nn.BatchNorm2d(output_nc), uprelu)
+        else:
+            self.mpconv = nn.Sequential(upconv, uprelu)
         self.out = out
-        self.conv_same = nn.Sequential(
-            nn.ConvTranspose2d(input_nc, input_nc, kernel_size=3, stride=1, padding=1, bias=use_bias),
-            norm_layer(input_nc), uprelu)
+        if use_BN:
+            self.conv_same = nn.Sequential(nn.ConvTranspose2d(input_nc, input_nc, kernel_size=3, stride=1, padding=1, bias=use_bias), nn.BatchNorm2d(input_nc), uprelu)
+        else:
+            self.conv_same = nn.Sequential(nn.ConvTranspose2d(input_nc, input_nc, kernel_size=3, stride=1, padding=1, bias=use_bias), uprelu)
         # self.conv_inner = nn.Sequential(nn.ConvTranspose2d(inner_nc, output_nc, kernel_size=4, stride=2, padding=1, bias=use_bias),norm_layer(input_nc), uprelu)
 
     def forward(self, x_up, x_left, x_before):
