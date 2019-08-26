@@ -755,7 +755,7 @@ def main():
                     list_epoch_val = list_random(val_files)
 
 
-                lr = opt.lr * 0.1 ** int((epoch) / 20)
+                lr = opt.lr * 0.1 ** int((epoch) / opt.decreaselr)
 
                 if epoch % 5 == 0:
                     test(epoch, lr,list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
