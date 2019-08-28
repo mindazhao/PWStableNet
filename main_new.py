@@ -467,10 +467,10 @@ def process():
         checkpoint = torch.load(net_g_model_out_path)
         netG.load_state_dict(checkpoint['net'])
 
-        if not os.path.exists("test_result"):
-            os.mkdir("test_result")
-        if not os.path.exists(os.path.join("test_result", class_name[ii])):
-            os.mkdir(os.path.join("test_result", class_name[ii]))
+        if not os.path.exists(opt.test_dir):
+            os.mkdir(opt.test_dir)
+        if not os.path.exists(os.path.join(opt.test_dir, class_name[ii])):
+            os.mkdir(os.path.join(opt.test_dir, class_name[ii]))
 
         #netG = torch.load('./checkpoint/unet_512_kalman_10_period_30-1515/netG_model_epoch_35.pth')
         netG.eval()
@@ -614,7 +614,7 @@ def process():
             size = (256, 256)
             size_crop = (int(x_end) - int(x_start) - threshold * 2, int(y_end) - int(y_start) - threshold * 2)
             fourcc = cv2.VideoWriter_fourcc('M', 'J', 'P', 'G')
-            videoWriter = cv2.VideoWriter('./test_result/' + class_name[ii] + '/' + str(list_videos[video_id])[0:-4] + '.avi',
+            videoWriter = cv2.VideoWriter('./'+opt.test_dir+'/' + class_name[ii] + '/' + str(list_videos[video_id])[0:-4] + '.avi',
                 fourcc, int(fps), size_crop)
             history_frame = []
             ret, img_init = cap.read()

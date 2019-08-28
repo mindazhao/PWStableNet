@@ -4,11 +4,12 @@ import numpy as np
 period = 30
 
 parser = argparse.ArgumentParser(description='pix2pix-warping-PyTorch-implementation')
-parser.add_argument('--continue_train', type=int, default=5, help='the number of starting train')
-parser.add_argument('--checkpoint_dir', required=False, default='unet_256_kalman_with_losspixel1', help='unet_affine_temp')
+parser.add_argument('--continue_train', type=int, required=True, default=5, help='the number of starting train')
+parser.add_argument('--checkpoint_dir', required=True, default='unet_256_kalman_with_losspixel1', help='unet_affine_temp')
 parser.add_argument('--mode', required=True, default='train', help='unet_affine_temp')
 parser.add_argument('--num_layer', type=int, default=3, help='number of layers for cascading')
-parser.add_argument('--batchSize', type=int, default=16, help='training batch size')
+parser.add_argument('--batchSize', type=int, required=True,default=16, help='training batch size')
+parser.add_argument('--test_dir',required=True,help='test dir')
 parser.add_argument('--nEpochs', type=int, default=80, help='number of epochs to train for')
 parser.add_argument('--input_nc', type=int, default=period + 1, help='input image channels')
 parser.add_argument('--output_nc', type=int, default=2, help='output image channels')
@@ -36,6 +37,8 @@ parser.add_argument('--shapeloss_weight', type=float, default=0.001, help='weigh
 parser.add_argument('--use_BN', type=bool, default=False, help='whether to use batchnorm')
 parser.add_argument('--visdom_port', type=int, default=8009, help='visdom port')
 parser.add_argument('--decreaselr', type=int, default=20, help='visdom port')
+
+
 
 opt = parser.parse_args()
 
