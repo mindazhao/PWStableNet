@@ -1,5 +1,6 @@
-# Pixel-wise Warping for Video Stabilization (PWNet)
-This is a [PyTorch](http://pytorch.org/) implementation of Pixel-wise Warping for Video Stabilization.
+# PWStableNet: Learning Pixel-wise Warping Maps for Video Stabilization
+This is a [PyTorch](http://pytorch.org/) implementation of PWStableNet: Learning Pixel-wise Warping Maps
+for Video Stabilization.
 
 Source code and models will be opened soon!
 
@@ -61,7 +62,7 @@ https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/v
 - Parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
 - Low quality: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/Low quality.avi
 
-###Note: If you have any problem to download these videos, you can visit another website: http://home.ustc.edu.cn/~zmd1992/PWStableNet.html
+### Note: If you have any problem to download these videos, you can visit another website: http://home.ustc.edu.cn/~zmd1992/PWStableNet.html
 
 
 
