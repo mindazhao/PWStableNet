@@ -54,12 +54,12 @@ CUDA_VISIBLE_DEVICES=0,1 python3 main.py
 we show an example videos to compare our PWNet with StabNet [1]
 ![image](https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/example.gif)
 - The video can be download here.
-https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/videos/example.mp4
+https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example.mp4
 ### More video result with improved PWStableNet 
 - Example I: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
 - Example II: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
-- Parallax: - Example I: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
-- Low quality: - Example I: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
+- Parallax: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
+- Low quality: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
 
 
 
