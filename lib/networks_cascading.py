@@ -4,6 +4,7 @@ from torch.nn import init
 import functools
 from lib.cfg import opt
 from torch.optim import lr_scheduler
+import torch.nn.functional as F
 
 ###############################################################################
 # Helper Functions
@@ -144,6 +145,9 @@ class UnetGenerator(nn.Module):
         self.up_bottom2 = up_bottom(ngf * 8//2, ngf * 2//2, ngf * 16//2)
         self.up_bottom1 = up_bottom(ngf * 4//2, ngf * 1, ngf * 8//2, out=True)
 
+        self.flatten = down(ngf*4, ngf * 8,kernal_size=2, stride=1, padding=0)
+        self.linear = down(ngf * 8, 6, kernal_size=1, stride=1, padding=0)
+
 
     def forward(self, input1,is_training=True):
         x11 = self.transfer(input1)  # 256->256
@@ -154,6 +158,10 @@ class UnetGenerator(nn.Module):
         x16 = self.down5(x15)  # 16->8
         x17 = self.down6(x16)  # 8->4
         x18 = self.down7(x17)  # 4->2
+
+        x1f=self.flatten(x18)
+        x1l=self.linear(x1f).view(-1,2,3)
+        affine1=F.affine_grid(x1l,torch.Size((x1l.size()[0],3,opt.input_size,opt.input_size)))
 
         x177 = self.up7(x18, x17)
         x166 = self.up6(x177, x16)
@@ -175,6 +183,10 @@ class UnetGenerator(nn.Module):
         x27 = self.down_bottom6(x26, x16)
         x28 = self.down_bottom7(x27, x17)
 
+        x2f = self.flatten(x28)
+        x2l = self.linear(x2f).view(-1, 2, 3)
+        affine2 = F.affine_grid(x2l, torch.Size((x2l.size()[0], 3, opt.input_size, opt.input_size)))
+
         x277 = self.up_bottom7(x18, x28, x27)
         x266 = self.up_bottom6(x177, x277, x26)
         x255 = self.up_bottom5(x166, x266, x25)
@@ -192,6 +204,10 @@ class UnetGenerator(nn.Module):
         x36 = self.down_bottom5(x35, x25)
         x37 = self.down_bottom6(x36, x26)
         x38 = self.down_bottom7(x37, x27)
+
+        x3f = self.flatten(x38)
+        x3l = self.linear(x3f).view(-1, 2, 3)
+        affine3 = F.affine_grid(x3l, torch.Size((x3l.size()[0], 3, opt.input_size, opt.input_size)))
 
         x377 = self.up_bottom7(x28, x38, x37)
         x366 = self.up_bottom6(x277, x377, x36)
@@ -216,9 +232,9 @@ class UnetGenerator(nn.Module):
         #op_unstable1 = torch.cat([self.op1(input1[:, 0:6, :, :]), self.op2(input1[:, 6:9, :, :])], dim=1)
         #op_unstable2 = torch.cat([self.op1(input2[:, 0:5, :, :]), self.op2(input2[:, 5:8, :, :])], dim=1)
         if is_training:
-            return [x_first, x_second, x_third]
+            return [x_first.permute(0,2,3,1)+affine1, x_second.permute(0,2,3,1)+affine2, x_third.permute(0,2,3,1)+affine3],[x_first.permute(0,2,3,1),x_second.permute(0,2,3,1),x_third.permute(0,2,3,1)]
         else:
-            return x_third
+            return x_third.permute(0,2,3,1)+affine3
 
 
 # Defines the submodule with skip connection.

@@ -12,7 +12,8 @@ from lib.utils import *
 
 from visdom import Visdom
 
-# os.environ["CUDA_VISIBLE_DEVICES"] = "6"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
+# os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 print(opt)
 if opt.mode=='train':
     viz = Visdom(server='http://127.0.0.1', port=opt.visdom_port)
@@ -97,20 +98,21 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
         fake1=[]
         fake2=[]
 
-        grid1= netG(image_unstable1[:, 0:period + 1, :, :])
+        grid1,affine1= netG(image_unstable1[:, 0:period + 1, :, :])
 
         for nl in range(opt.num_layer):
-            grid1[nl]=generate_maps(grid1[nl]).permute(0,2,3,1)
+            # grid1[nl]=generate_maps(grid1[nl]).permute(0,2,3,1)
+
             fake1_temp = functional.grid_sample((image_unstable1[:, period + 1:period + 1 + 3, :, :] + 1) * 127.5,grid1[nl])
             fake1.append(fake1_temp / 127.5 - 1)
             # fake1.append(functional.grid_sample(image_unstable1[:, period + 1:period + 1 + 3, :, :], grid1[nl]))
         fake1_gray = functional.grid_sample((image_unstable1[:, period // 2: period // 2 + 1:, :] + 1) * 127.5,grid1[opt.num_layer - 1])
         fake1_gray = fake1_gray / 127.5 - 1
 
-        grid2 = netG(image_unstable2[:, 0:period + 1, :, :])
-
+        grid2,affine2 = netG(image_unstable2[:, 0:period + 1, :, :])
+        # print(affine1)
         for nl in range(opt.num_layer):
-            grid2[nl] = generate_maps(grid2[nl]).permute(0, 2, 3, 1)
+            # grid2[nl] = generate_maps(grid2[nl]).permute(0, 2, 3, 1)
             fake2_temp = functional.grid_sample((image_unstable2[:, period + 1:period + 1 + 3, :, :] + 1) * 127.5,grid2[nl])
             fake2.append(fake2_temp / 127.5 - 1)
         fake2_gray = functional.grid_sample((image_unstable2[:, period // 2: period // 2 + 1:, :] + 1) * 127.5,grid2[opt.num_layer - 1])
@@ -189,19 +191,19 @@ def train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, li
             loss_vgg += generator_criterion(fake1[nl], image_stable1[:,0:3,:,:])
             loss_vgg += generator_criterion(fake2[nl], image_stable2[:,0:3,:,:])
 
-            # feature_adjacent = feature_adjacent.view(-1, 2, 3)
-            # grid = functional.affine_grid(feature_adjacent, fake1[nl].size())
-            #
-            # output2_to_output1 = functional.grid_sample(fake2[nl], grid)
-            # loss_g2 += torch.mean(torch.abs(output2_to_output1 - fake1[nl]))
+            feature_adjacent = feature_adjacent.view(-1, 2, 3)
+            grid = functional.affine_grid(feature_adjacent, fake1[nl].size())
 
-            loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
+            output2_to_output1 = functional.grid_sample(fake2[nl], grid)
+            loss_g2 += torch.mean(torch.abs(output2_to_output1 - fake1[nl]))
+
+            # loss_g2+=torch.mean(torch.abs(fake2[nl] - fake1[nl]))
 
             if opt.shapeloss:
-               loss_pixel = loss_pixel1(grid1[nl], grid_eye, A_affine, opt.block, opt.block, opt.input_size) * opt.shapeloss_weight + loss_pixel1(grid2[nl], grid_eye, A_affine, opt.block, opt.block, opt.input_size) * opt.shapeloss_weight
+               loss_pixel = loss_pixel1(affine1[nl], grid_eye, A_affine, opt.block, opt.block, opt.input_size) * opt.shapeloss_weight + loss_pixel1(affine2[nl], grid_eye, A_affine, opt.block, opt.block, opt.input_size) * opt.shapeloss_weight
 
         if opt.shapeloss:
-            loss_g1 = loss_feature+loss_vgg+ loss_mse + loss_pixel #+loss_pixel  # + loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
+            loss_g1 = loss_feature+(loss_vgg+ loss_mse) + loss_pixel #+loss_pixel  # + loss_affine * 20  # (delta1+delta2)*10+loss_affine*1000
         else:
             loss_g1 = loss_feature + loss_vgg + loss_mse
         if opt.use_gan and with_gan:
@@ -451,9 +453,10 @@ def process():
     stride_sample = 15
     threshold = 0
     rate = 0.5
+    for ii in range(0, 1):
+    # for ii in range(1,len(class_name)):
 
-    for ii in range(1,len(class_name)):
-
+        # path = '/media/ssd1/zmd/dataset/normal/' + class_name[ii] + '/'
         path = '/media/ssd1/zmd/dataset/normal/' + class_name[ii] + '/'
         # path = '/data/zmd/DeepStab/DeepStab/unstable_test/'
 
@@ -700,7 +703,7 @@ def process():
                 # print(grid[1])
                 # grid_drift=grid[0]
                 # grid_sum=grid_affine.permute(0,3,1,2)+grid_drift
-                grid = generate_maps(grid,1)
+                grid = grid.permute(0,3,1,2)
 
                 m = torch.nn.UpsamplingBilinear2d(size=(size_origin[1], size_origin[0]))
                 grid_resize = m(grid)
@@ -729,7 +732,7 @@ def process():
                 unstable_resize = cv2.resize(history_frame[period // 2], (640, 360), interpolation=cv2.INTER_AREA)
                 # cv2.imshow('show_unstable.jpg', unstable_resize)
                 # cv2.imshow('show_stable.jpg', samples_resize)
-                # # cv2.imshow('show_crop.jpg',samples_resize)
+                # # # cv2.imshow('show_crop.jpg',samples_resize)
                 # cv2.waitKey(1)
                 videoWriter.write(samples_resize)  # 写视频帧
                 time_sum2 = time.time()
@@ -757,8 +760,8 @@ def main():
 
                 lr = opt.lr * 0.1 ** int((epoch) / opt.decreaselr)
 
-                if epoch % 5 == 0:
-                    test(epoch, lr,list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
+                # if epoch % 5 == 0:
+                #     test(epoch, lr,list_stable_val, list_unstable_val, list_feature_val, list_adjacent_val, list_affine_val,list_epoch_val)
 
                 train(epoch, lr, list_stable, list_unstable, list_feature, list_adjacent, list_affine, list_epoch)
                 if epoch%5==0:
