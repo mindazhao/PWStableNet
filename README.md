@@ -52,18 +52,16 @@ CUDA_VISIBLE_DEVICES=0,1 python3 main.py
 
 ### Original result before improvement:
 we show an example videos to compare our PWNet with StabNet [1]
-![image](https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/example.gif)
+![image](https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example.gif)
 - The video can be download here.
 https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example.mp4
 ### More video result with improved PWStableNet 
-- Example I: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
-- Example II: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
-- Parallax: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
-- Low quality: https://raw.githubusercontent.com/mindazhao/pix-pix-warping-video-stabilization/modified/example.mp4
+- Example I: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example1.avi
+- Example II: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example2.avi
+- Parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
+- Low quality: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/Low quality.avi
 
-
-
-
+###Note: If you have any problem to download these videos, you can visit another website: http://home.ustc.edu.cn/~zmd1992/PWStableNet.html
 
 
 
