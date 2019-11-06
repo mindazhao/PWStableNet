@@ -59,7 +59,10 @@ https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/v
 ### More video result with improved PWStableNet 
 - Example I: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example1.avi
 - Example II: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/example2.avi
-- Parallax: weak parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
+- Parallax:
+1. weak parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
+2. weak parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
+3. weak parallax: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/parallax.avi
 - Low quality: https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/videos/Low quality.avi
 
 ### Note: If you have any problem to download these videos, you can visit another website: http://home.ustc.edu.cn/~zmd1992/PWStableNet.html
