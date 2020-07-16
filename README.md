@@ -76,7 +76,7 @@ https://github.com/mindazhao/pix-pix-warping-video-stabilization/blob/modified/v
 #### Download a pre-trained network
 - We are trying to provide a pre-trained model.
 - Currently, we provide the following PyTorch models:
-       model can be get from home.ustc.edu.cn/~zmd1992/PWStableNet/netG_model.pth
+       model can be get from https://home.ustc.edu.cn/~zmd1992/PWStableNet/netG_model.pth
 - You can test your own unstable videos by changing the parameter "train" with False and adjust the path yourself in function "process()".
     
 
